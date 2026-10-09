@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Colorization Pipeline</title>
+<style>
+  :root {
+    --bg: #f8fafc;
+    --surface: #ffffff;
+    --surface-2: #f1f5f9;
+    --border: #e2e8f0;
+    --border-strong: #cbd5e1;
+    --text: #0f172a;
+    --text-2: #475569;
+    --text-3: #94a3b8;
+    --accent: #0d9488;
+    --accent-hover: #0f766e;
+    --accent-soft: #ccfbf1;
+    --accent-ink: #115e59;
+    --ok-soft: #d1fae5;
+    --ok-ink: #047857;
+    --warn-soft: #fef3c7;
+    --warn-ink: #92400e;
+    --shadow-sm: 0 1px 2px rgba(15, 23, 42, .05);
+    --radius: 8px;
+    --radius-sm: 5px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.5 system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3, p, ul, ol { margin: 0; }
+  button, input { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  /* Header */
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+  }
+  .header-inner {
+    max-width: 1080px; margin: 0 auto;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand-mark {
+    width: 28px; height: 28px; border-radius: 6px; background: var(--text);
+    display: grid; place-items: center;
+  }
+  .brand-mark svg { width: 15px; height: 15px; stroke: #fff; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .brand h1 { font-size: 15px; font-weight: 650; }
+  .badges { display: flex; gap: 6px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 500; background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border);
+  }
+  .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); }
+  .badge.ok { background: var(--ok-soft); color: var(--ok-ink); border-color: #a7f3d0; }
+  .badge.ok::before { background: #10b981; }
+  .badge.warn { background: var(--warn-soft); color: var(--warn-ink); border-color: #fde68a; }
+  .badge.warn::before { background: #f59e0b; }
+  .badge.run::before { background: var(--accent); animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+
+  /* Layout */
+  .app {
+    max-width: 1080px; margin: 0 auto; padding: 16px;
+    display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 16px; align-items: start;
+  }
+  .stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  @media (max-width: 820px) { .app { grid-template-columns: 1fr; } }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); }
+  .card-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 10px 14px; border-bottom: 1px solid var(--border);
+  }
+  .card-head h2 { font-size: 13px; font-weight: 600; }
+  .card-body { padding: 14px; }
+
+  /* Buttons & Inputs */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
+    border-radius: var(--radius-sm); padding: 5px 11px; font-weight: 500; cursor: pointer;
+    font-size: 12px; transition: background .15s, border-color .15s;
+  }
+  .btn:hover:not(:disabled) { background: var(--surface-2); border-color: var(--text-3); }
+  .btn:disabled { color: var(--text-3); cursor: not-allowed; background: var(--surface-2); border-color: var(--border); }
+  .btn.sm { padding: 3px 8px; font-size: 11px; }
+  .btn.link { border-color: transparent; background: transparent; color: var(--text-2); padding: 2px 6px; }
+  .btn.link:hover:not(:disabled) { background: var(--surface-2); }
+  .btn.accent { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.accent:hover:not(:disabled) { background: var(--accent-hover); }
+  .btn.accent:disabled { background: var(--border); border-color: var(--border); }
+
+  input[type="number"] {
+    width: 100%; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+    background: var(--surface); padding: 4px 6px; font-size: 12px;
+  }
+  input[type="range"] { width: 100%; accent-color: var(--accent); margin: 0; }
+  label { display: block; font-size: 12px; font-weight: 500; color: var(--text); margin-bottom: 4px; }
+  .hint { font-size: 11px; color: var(--text-3); margin-top: 4px; }
+
+  /* Setting Fields */
+  .setting-group + .setting-group { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .pair { display: grid; grid-template-columns: 1fr 60px; gap: 8px; align-items: center; }
+  .pair input[type="number"] { text-align: right; }
+  .field-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+  .field-top label { margin: 0; }
+
+  /* Experts Chips in Sidebar */
+  .expert-chips { display: flex; flex-direction: column; gap: 6px; }
+  .expert-chip {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 10px; background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); font-size: 12px; font-weight: 500;
+  }
+  .expert-chip.active { background: var(--accent-soft); border-color: #99f6e4; color: var(--accent-ink); }
+  .expert-status { font-size: 10px; text-transform: uppercase; font-weight: 600; opacity: 0.8; }
+
+  /* Read-only Prompts */
+  .plist { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .plist li {
+    display: flex; gap: 8px; align-items: flex-start; padding: 6px 9px;
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  }
+  .plist .pidx {
+    font-size: 10px; font-weight: 600; color: var(--accent-ink);
+    background: var(--accent-soft); border-radius: 3px; padding: 1px 5px; margin-top: 1px;
+  }
+  .plist .ptxt { flex: 1; word-break: break-word; font-size: 12px; color: var(--text-2); }
+
+  /* Upload */
+  .drop {
+    display: flex; align-items: center; gap: 12px; padding: 12px 14px; cursor: pointer;
+    border: 1.5px dashed var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-2);
+    transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); background: #f0fdfa; }
+  .drop-icon {
+    width: 32px; height: 32px; border-radius: 6px; background: var(--surface);
+    border: 1px solid var(--border); display: grid; place-items: center; flex: none;
+  }
+  .drop-icon svg { width: 16px; height: 16px; stroke: var(--accent); fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .drop-text { flex: 1; min-width: 0; }
+  .drop-text strong { display: block; font-size: 12px; }
+  .drop-text span { font-size: 11px; color: var(--text-2); }
+
+  /* Compare Views */
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+  @media (max-width: 580px) { .compare { grid-template-columns: 1fr; } }
+  .pane-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .pane-head h3 { font-size: 12px; font-weight: 600; }
+  .pane-head .cap { font-size: 11px; color: var(--text-2); }
+  .view {
+    position: relative; aspect-ratio: 4 / 3; border-radius: var(--radius-sm); border: 1px solid var(--border);
+    background: #cbd5e1; display: grid; place-items: center; overflow: hidden;
+  }
+  .view img, .view canvas { max-width: 100%; max-height: 100%; display: block; }
+  .placeholder { text-align: center; color: var(--text-2); font-size: 12px; padding: 8px 12px; background: rgba(255,255,255,.9); border-radius: var(--radius-sm); }
+  .view.filled .placeholder { display: none; }
+  .busy {
+    position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+    background: rgba(248, 250, 252, .9); font-size: 12px; color: var(--text-2); font-weight: 500;
+  }
+  .view.loading .busy { display: flex; }
+  .spinner { width: 22px; height: 22px; border-radius: 50%; border: 2.5px solid var(--border-strong); border-top-color: var(--accent); animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Run Footer */
+  .run { display: flex; align-items: center; gap: 14px; padding: 12px 14px; }
+  .run-info { flex: 1; min-width: 140px; }
+  .run-info .line { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-2); margin-bottom: 4px; }
+  .bar { height: 6px; border-radius: 999px; background: var(--border); overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .2s ease; }
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="header-inner">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4v16M4 12h16"/></svg>
+      </div>
+      <h1>Colorization Pipeline</h1>
+    </div>
+    <div class="badges">
+      <span class="badge warn" id="bImage">No image</span>
+      <span class="badge" id="bRun">Idle</span>
+    </div>
+  </div>
+</header>
+
+<main class="app">
+
+  <!-- Left Sidebar: Active Experts & Blend Settings -->
+  <aside class="stack">
+
+    <!-- Active Experts (Compact Read-Only List) -->
+    <section class="card">
+      <div class="card-head">
+        <h2>Active Experts</h2>
+        <span class="cap" id="expertCount" style="font-size:11px; color:var(--text-3);"></span>
+      </div>
+      <div class="card-body">
+        <div class="expert-chips" id="expertList"></div>
+      </div>
+    </section>
+
+    <!-- Blend Settings -->
+    <section class="card">
+      <div class="card-head">
+        <h2>Blend Settings</h2>
+        <button class="btn link" id="resetBtn" type="button">Reset</button>
+      </div>
+      <div class="card-body">
+        <div class="setting-group">
+          <div class="field-top"><label for="opacity">Blend Opacity</label></div>
+          <div class="pair">
+            <input type="range" id="opacity" min="0" max="1" step="0.05" value="1">
+            <input type="number" id="opacityN" min="0" max="1" step="0.05" value="1">
+          </div>
+          <p class="hint">Influence over the original image.</p>
+        </div>
+
+        <div class="setting-group">
+          <div class="field-top"><label for="sat">Saturation Gain</label></div>
+          <div class="pair">
+            <input type="range" id="sat" min="0" max="2" step="0.05" value="1">
+            <input type="number" id="satN" min="0" max="2" step="0.05" value="1">
+          </div>
+          <p class="hint">Adjust color vibrancy.</p>
+        </div>
+      </div>
+    </section>
+
+  </aside>
+
+  <!-- Workspace & Outputs -->
+  <div class="stack">
+
+    <!-- Workspace Panel -->
+    <section class="card">
+      <div class="card-head">
+        <h2>Workspace</h2>
+        <button class="btn link" id="clearBtn" type="button" disabled>Clear image</button>
+      </div>
+      <div class="card-body">
+        <div class="drop" id="drop" tabindex="0">
+          <div class="drop-icon">
+            <svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+          </div>
+          <div class="drop-text">
+            <strong id="dropTitle">Select or drop an image</strong>
+            <span id="dropSub">PNG, JPG or WebP</span>
+          </div>
+          <span class="btn sm">Browse</span>
+        </div>
+        <input type="file" id="file" accept="image/*" hidden>
+
+        <div class="compare">
+          <div>
+            <div class="pane-head"><h3>Original</h3><span class="cap" id="capIn"></span></div>
+            <div class="view" id="viewIn">
+              <span class="placeholder">No image</span>
+              <img id="imgIn" alt="Original upload" hidden>
+            </div>
+          </div>
+          <div>
+            <div class="pane-head">
+              <h3>Colorized</h3>
+              <button class="btn sm" id="dlBtn" disabled>Download</button>
+            </div>
+            <div class="view" id="viewOut">
+              <span class="placeholder">Awaiting run</span>
+              <canvas id="out" hidden></canvas>
+              <div class="busy"><div class="spinner"></div><span id="busyText">Processing</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Hardcoded Read-Only Prompts Panel -->
+    <section class="card">
+      <div class="card-head">
+        <h2>Hardcoded Prompts</h2>
+        <span class="cap" id="promptCount" style="font-size:11px; color:var(--text-3);"></span>
+      </div>
+      <div class="card-body">
+        <ol class="plist" id="plist"></ol>
+      </div>
+    </section>
+
+    <!-- Run Controls -->
+    <section class="card">
+      <div class="run">
+        <button class="btn accent" id="runBtn" disabled>Run pipeline</button>
+        <div class="run-info">
+          <div class="line"><span id="runMsg">Upload an image to start.</span><span id="runPct">0%</span></div>
+          <div class="bar"><div id="fill"></div></div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+</main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const esc = s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  // Updated hardcoded experts list
+  const HARDCODED_EXPERTS = [
+    { name: 'Portraits/People', active: true },
+    { name: 'Nature', active: true },
+    { name: 'Urban/Buildings', active: true },
+    { name: 'Animals', active: true }
+  ];
+
+  const HARDCODED_PROMPTS = [
+    'Natural, slightly warm daylight colors',
+    'Preserve neutral background luminance',
+    'Enhance skin tones and natural highlights'
+  ];
+
+  const DEFAULTS = { opacity: 1, sat: 1 };
+
+  const state = {
+    image: null,
+    fileName: '',
+    running: false,
+  };
+
+  const el = {
+    drop: $('drop'), file: $('file'), dropTitle:$('dropTitle'), dropSub: $('dropSub'), clearBtn:$('clearBtn'),
+    imgIn: $('imgIn'), viewIn:$('viewIn'), viewOut: $('viewOut'), out:$('out'), capIn: $('capIn'), dlBtn:$('dlBtn'),
+    busyText: $('busyText'), expertList: $('expertList'), expertCount:$('expertCount'),
+    plist: $('plist'), promptCount:$('promptCount'),
+    opacity: $('opacity'), opacityN:$('opacityN'), sat: $('sat'), satN:$('satN'),
+    resetBtn: $('resetBtn'), runBtn: $('runBtn'), runMsg:$('runMsg'), runPct: $('runPct'), fill:$('fill'),
+    bImage: $('bImage'), bRun:$('bRun')
+  };
+
+  function setBadge(node, cls, text) { node.className = 'badge' + (cls ? ' ' + cls : ''); node.textContent = text; }
+  function setProgress(pct, msg) {
+    el.fill.style.width = pct + '%';
+    el.runPct.textContent = Math.round(pct) + '%';
+    if (msg) el.runMsg.textContent = msg;
+  }
+
+  function refresh() {
+    if (state.image) setBadge(el.bImage, 'ok', 'Image loaded');
+    else setBadge(el.bImage, 'warn', 'No image');
+
+    el.runBtn.disabled = state.running || !state.image;
+    el.clearBtn.disabled = !state.image || state.running;
+
+    if (!state.running) {
+      if (!state.image) setProgress(0, 'Upload an image to start.');
+      else setProgress(0, 'Ready to run.');
+    }
+  }
+
+  // Render Experts in Sidebar
+  function renderExperts() {
+    el.expertList.innerHTML = HARDCODED_EXPERTS.map(e => `
+      <div class="expert-chip active">
+        <span>${esc(e.name)}</span>
+        <span class="expert-status">Active</span>
+      </div>
+    `).join('');
+    el.expertCount.textContent = `${HARDCODED_EXPERTS.length} active`;
+  }
+
+  // Render immutable prompts
+  function renderPrompts() {
+    el.plist.innerHTML = HARDCODED_PROMPTS.map((p, i) => `
+      <li>
+        <span class="pidx">${i + 1}</span>
+        <span class="ptxt">${esc(p)}</span>
+      </li>
+    `).join('');
+    el.promptCount.textContent = `${HARDCODED_PROMPTS.length} prompt steps`;
+  }
+
+  // Upload Handlers
+  function loadFile(file) {
+    if (!file || !file.type.startsWith('image/')) return;
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      if (state.image && state.image.src.startsWith('blob:')) URL.revokeObjectURL(state.image.src);
+      state.image = img;
+      state.fileName = file.name;
+      el.imgIn.src = url;
+      el.imgIn.hidden = false;
+      el.viewIn.classList.add('filled');
+      el.dropTitle.textContent = file.name;
+      el.dropSub.textContent = `${img.naturalWidth} × ${img.naturalHeight} px`;
+      el.capIn.textContent = `${img.naturalWidth} × ${img.naturalHeight}`;
+      clearOutput();
+      refresh();
+    };
+    img.src = url;
+  }
+
+  function clearOutput() {
+    el.out.hidden = true;
+    el.viewOut.classList.remove('filled');
+    el.dlBtn.disabled = true;
+  }
+
+  function clearImage() {
+    if (state.image && state.image.src.startsWith('blob:')) URL.revokeObjectURL(state.image.src);
+    state.image = null;
+    state.fileName = '';
+    el.imgIn.hidden = true;
+    el.imgIn.removeAttribute('src');
+    el.viewIn.classList.remove('filled');
+    el.capIn.textContent = '';
+    el.file.value = '';
+    el.dropTitle.textContent = 'Select or drop an image';
+    el.dropSub.textContent = 'PNG, JPG or WebP';
+    clearOutput();
+    refresh();
+  }
+
+  el.drop.addEventListener('click', () => el.file.click());
+  el.file.addEventListener('change', () => loadFile(el.file.files[0]));
+  el.drop.addEventListener('dragover', e => { e.preventDefault(); el.drop.classList.add('over'); });
+  el.drop.addEventListener('dragleave', () => el.drop.classList.remove('over'));
+  el.drop.addEventListener('drop', e => {
+    e.preventDefault();
+    el.drop.classList.remove('over');
+    loadFile(e.dataTransfer.files[0]);
+  });
+  el.clearBtn.addEventListener('click', clearImage);
+
+  // Settings Synchronization
+  function pair(rangeEl, numEl) {
+    const min = parseFloat(rangeEl.min), max = parseFloat(rangeEl.max), step = parseFloat(rangeEl.step);
+    rangeEl.addEventListener('input', () => { numEl.value = rangeEl.value; });
+    numEl.addEventListener('change', () => {
+      let v = clamp(parseFloat(numEl.value) || min, min, max);
+      v = Math.round((v - min) / step) * step + min;
+      numEl.value = v; rangeEl.value = v;
+    });
+  }
+
+  pair(el.opacity, el.opacityN);
+  pair(el.sat, el.satN);
+
+  el.resetBtn.addEventListener('click', () => {
+    el.opacity.value = el.opacityN.value = DEFAULTS.opacity;
+    el.sat.value = el.satN.value = DEFAULTS.sat;
+  });
+
+  // Colorization simulation based on blend settings
+  function renderOutput(opacity, sat) {
+    const img = state.image;
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(img, 0, 0, w, h);
+    const data = ctx.getImageData(0, 0, w, h), px = data.data;
+
+    const gain = clamp(sat * 0.7, 0, 1.5);
+    for (let i = 0; i < px.length; i += 4) {
+      const r = px[i], g = px[i + 1], b = px[i + 2];
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      
+      const tr = clamp(lum * 1.15, 0, 255);
+      const tg = clamp(lum * 1.02, 0, 255);
+      const tb = clamp(lum * 0.82, 0, 255);
+
+      const mr = lum + (tr - lum) * gain;
+      const mg = lum + (tg - lum) * gain;
+      const mb = lum + (tb - lum) * gain;
+
+      px[i] = clamp(r + (mr - r) * opacity, 0, 255);
+      px[i + 1] = clamp(g + (mg - g) * opacity, 0, 255);
+      px[i + 2] = clamp(b + (mb - b) * opacity, 0, 255);
+    }
+
+    ctx.putImageData(data, 0, 0);
+    el.out.width = w; el.out.height = h;
+    el.out.getContext('2d').drawImage(c, 0, 0);
+  }
+
+  // Pipeline Execution
+  el.runBtn.addEventListener('click', async () => {
+    if (state.running || !state.image) return;
+    state.running = true;
+    el.runBtn.disabled = true;
+    el.clearBtn.disabled = true;
+    el.dlBtn.disabled = true;
+    el.viewOut.classList.add('loading');
+    setBadge(el.bRun, 'run', 'Running');
+
+    setProgress(20, 'Preparing inputs...');
+    await sleep(250);
+
+    setProgress(50, 'Evaluating active experts...');
+    await sleep(350);
+
+    setProgress(80, 'Applying blend parameters...');
+    await sleep(250);
+
+    renderOutput(+el.opacity.value, +el.sat.value);
+
+    el.out.hidden = false;
+    el.viewOut.classList.remove('loading');
+    el.viewOut.classList.add('filled');
+    el.dlBtn.disabled = false;
+    setBadge(el.bRun, 'ok', 'Complete');
+    setProgress(100, 'Colorization complete.');
+
+    state.running = false;
+    refresh();
+  });
+
+  el.dlBtn.addEventListener('click', () => {
+    el.out.toBlob(b => {
+      if (!b) return;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b);
+      a.download = (state.fileName.replace(/\.[^.]+$/, '') || 'colorized') + '.png';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    });
+  });
+
+  renderExperts();
+  renderPrompts();
+  refresh();
+})();
+</script>
+</body>
+</html>
