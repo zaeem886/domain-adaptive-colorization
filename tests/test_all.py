@@ -72,7 +72,10 @@ if "torch" not in sys.modules:
         sys.modules["torch"] = torch_stub
         sys.modules["torch.nn"] = nn_stub
 
-sys.path.insert(0, "/home/zaeem/Documents/domain-adaptive-colorization")
+import os
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 from colorize.config import DecompConfig
 from colorize.regions import Region

@@ -73,7 +73,8 @@ class GroundedSAM:
         # The argument name changed across transformers versions (box_threshold -> threshold).
         kw["threshold" if "threshold" in inspect.signature(fn).parameters else "box_threshold"] = self.cfg.box_threshold
         res = fn(outputs, inputs.input_ids, **kw)[0]
-        labels = [str(x) for x in res.get("text_labels", res["labels"])]
+        raw_labels = res["text_labels"] if "text_labels" in res else res["labels"]
+        labels = [str(x) for x in raw_labels]
         return res["boxes"].cpu().numpy(), res["scores"].cpu().numpy(), labels
 
     def _run_sam(self, rgb_array: np.ndarray, boxes: np.ndarray) -> List[np.ndarray]:
