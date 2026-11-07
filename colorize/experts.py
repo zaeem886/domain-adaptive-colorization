@@ -20,6 +20,12 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import numpy as np
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
 try:
     import torch
     import torch.nn as nn
@@ -46,28 +52,62 @@ def default_registry() -> ExpertRegistry:
 # DDColor-T model wrapper
 # ---------------------------------------------------------------------------
 
-def _build_ddcolor_t(checkpoint: str, device: torch.device) -> nn.Module:
+def _l_to_gray_rgb(L: np.ndarray) -> np.ndarray:
+    """Convert an L channel to the 3-channel grayscale-RGB input DDColor expects.
+
+    DDColor is trained (and run upstream) on :math:`\\mathrm{Lab}(L, 0, 0)`
+    converted to sRGB, not on a bare replicated ``L / 100`` channel.  L is in
+    the OpenCV/skimage range ``[0, 100]``; the returned array is float32 in
+    ``[0, 1]`` with shape ``(S, S, 3)``.
+    """
+    lab = np.stack([L, np.zeros_like(L), np.zeros_like(L)], axis=-1).astype(np.float32)
+    if cv2 is not None:
+        flag = getattr(cv2, "COLOR_LAB2RGB", getattr(cv2, "COLOR_Lab2RGB", None))
+        rgb = cv2.cvtColor(lab, flag)
+    else:
+        try:
+            from skimage.color import lab2rgb  # type: ignore[import]
+
+            rgb = lab2rgb(lab).astype(np.float32)
+        except ImportError:
+            # For a = b = 0 the result is a neutral gray; compute it directly.
+            y = (L + 16.0) / 116.0
+            delta = 6.0 / 29.0
+            linear_y = np.where(y > delta, y ** 3, 3 * delta ** 2 * (y - 4.0 / 29.0))
+            v = np.where(
+                linear_y <= 0.0031308,
+                12.92 * linear_y,
+                1.055 * np.maximum(linear_y, 0.0) ** (1.0 / 2.4) - 0.055,
+            )
+            rgb = np.stack([v, v, v], axis=-1)
+    return np.clip(rgb, 0.0, 1.0).astype(np.float32)
+
+
+def _build_ddcolor_t(checkpoint: str, device: torch.device, input_size: int = 256) -> nn.Module:
     """Instantiate DDColor-T (ConvNeXt-T backbone) and load *checkpoint*.
 
-    DDColor is available on PyPI as ``basicsr`` + ``ddcolor``.  We import it
-    lazily so the rest of the module can be imported without it being installed
-    (useful for unit tests that mock ``_build_ddcolor_t``).
+    DDColor is imported lazily so the rest of the module can be imported
+    without it being installed (useful for unit tests that mock this
+    function).  The upstream repo root must be on ``sys.path`` so that both
+    ``ddcolor`` and its vendored ``basicsr`` are importable; ``main.py`` does
+    this when ``--ddcolor-path`` is supplied.
 
-    If the ``ddcolor`` package is not installed, a ``RuntimeError`` is raised
-    with an installation hint.
+    If ``ddcolor`` cannot be imported, a ``RuntimeError`` is raised with a
+    setup hint.
     """
     try:
         from ddcolor import DDColor  # type: ignore[import]
     except ImportError as exc:
         raise RuntimeError(
             "The 'ddcolor' package is required for expert colorization.  "
-            "Install it with:  pip install ddcolor"
+            "Clone https://github.com/piddnad/DDColor and pass its root via "
+            "--ddcolor-path (or put it on PYTHONPATH)."
         ) from exc
 
     model = DDColor(
         encoder_name="convnext-t",
-        decoder_type="MultiScaleColorDecoder",
-        input_size=[256, 256],
+        decoder_name="MultiScaleColorDecoder",
+        input_size=[input_size, input_size],
         num_output_channels=2,
         last_norm="Spectral",
         do_normalize=False,
@@ -76,8 +116,17 @@ def _build_ddcolor_t(checkpoint: str, device: torch.device) -> nn.Module:
         dec_layers=9,
     )
     ckpt = torch.load(checkpoint, map_location=device)
-    state = ckpt.get("params", ckpt)  # support both raw state-dict and param-wrapped files
-    model.load_state_dict(state, strict=True)
+    # Support both a raw state-dict and a training checkpoint wrapped in "params".
+    state = ckpt.get("params", ckpt) if isinstance(ckpt, dict) else ckpt
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing or unexpected:
+        logger.warning(
+            "Checkpoint %s did not match DDColor-T exactly "
+            "(missing=%d, unexpected=%d keys).",
+            checkpoint,
+            len(missing),
+            len(unexpected),
+        )
     model.to(device)
     model.eval()
     return model
@@ -94,11 +143,21 @@ class Colorizer:
         Path to the ``.pth`` checkpoint file.
     device:
         PyTorch device string, e.g. ``"cuda:0"`` or ``"cpu"``.
+    input_size:
+        Side length the DDColor encoder is built for.  Expert crops are already
+        resized to this size by the extractor.
     """
 
-    def __init__(self, domain: str, checkpoint: str, device: str = "cuda") -> None:
+    def __init__(
+        self,
+        domain: str,
+        checkpoint: str,
+        device: str = "cuda",
+        input_size: int = 256,
+    ) -> None:
         self.domain = domain
         self.checkpoint = checkpoint
+        self.input_size = int(input_size)
         if torch is not None:
             self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         else:
@@ -114,7 +173,7 @@ class Colorizer:
         if self._model is not None:
             return
         logger.info("Loading checkpoint for domain '%s' from %s", self.domain, self.checkpoint)
-        self._model = _build_ddcolor_t(self.checkpoint, self.device)
+        self._model = _build_ddcolor_t(self.checkpoint, self.device, self.input_size)
 
     def release(self) -> None:
         """Release GPU memory (idempotent)."""
@@ -123,7 +182,7 @@ class Colorizer:
         logger.info("Releasing expert for domain '%s'", self.domain)
         del self._model
         self._model = None
-        if self.device.type == "cuda":
+        if torch is not None and str(self.device).startswith("cuda"):
             torch.cuda.empty_cache()
 
     # ------------------------------------------------------------------
@@ -149,9 +208,12 @@ class Colorizer:
                 f"Colorizer for domain '{self.domain}' has not been loaded.  "
                 "Call load() first."
             )
-        # Normalise L to [0, 1] and reshape to (1, 1, S, S)
-        L_norm = (L / 100.0).astype(np.float32)
-        tensor = torch.from_numpy(L_norm).unsqueeze(0).unsqueeze(0).to(self.device)
+        if L.ndim != 2:
+            raise ValueError(f"L must be 2-D (H, W), got shape {L.shape}")
+
+        # DDColor expects 3-channel grayscale-RGB in [0, 1], shape (1, 3, S, S).
+        gray_rgb = _l_to_gray_rgb(L)
+        tensor = torch.from_numpy(gray_rgb.transpose(2, 0, 1)).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
             ab_tensor = self._model(tensor)  # (1, 2, S, S)
@@ -179,11 +241,19 @@ class ExpertManager:
         Maps domain names to checkpoint paths.
     device:
         PyTorch device string forwarded to each ``Colorizer``.
+    input_size:
+        Expert input side length forwarded to each ``Colorizer``.
     """
 
-    def __init__(self, registry: ExpertRegistry, device: str = "cuda") -> None:
+    def __init__(
+        self,
+        registry: ExpertRegistry,
+        device: str = "cuda",
+        input_size: int = 256,
+    ) -> None:
         self._registry = registry
         self._device = device
+        self._input_size = int(input_size)
         self._cache: Dict[str, Colorizer] = {}
 
     # ------------------------------------------------------------------
@@ -204,7 +274,12 @@ class ExpertManager:
                 f"Available: {list(self._registry)}"
             )
         if domain not in self._cache:
-            colorizer = Colorizer(domain, self._registry[domain], self._device)
+            colorizer = Colorizer(
+                domain,
+                self._registry[domain],
+                self._device,
+                input_size=self._input_size,
+            )
             colorizer.load()
             self._cache[domain] = colorizer
         return self._cache[domain]

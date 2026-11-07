@@ -105,7 +105,11 @@ class ColorizationPipeline:
         binary_masks = []
         crops = []
 
-        with ExpertManager(self.registry, self.device) as manager:
+        with ExpertManager(
+            self.registry,
+            self.device,
+            input_size=self.cfg.input_size,
+        ) as manager:
             for region in all_regions:
                 domain = region.domain
                 L_crop, crop = extractor.extract_input(L_full, region)
