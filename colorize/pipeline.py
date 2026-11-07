@@ -21,15 +21,43 @@ Typical usage::
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 
 import numpy as np
 
 from .blending import Blender, Reconstructor
 from .colorization_config import ColorizationConfig
 from .experts import ExpertManager, ExpertRegistry
-from .extraction import RegionExtractor
+from .extraction import CropBox, RegionExtractor
 from .regions import Decomposition, Region
+
+
+@dataclass
+class RegionTrace:
+    """Intermediate data collected for one region (fallback included)."""
+
+    index: int
+    region: Region
+    crop: CropBox
+    L_crop: np.ndarray        # (S, S) expert input
+    ab_pred: np.ndarray       # (S, S, 2) raw expert output
+    ab_canvas: np.ndarray     # (H, W, 2) mapped back to the working image
+    binary_mask: np.ndarray   # (H, W) mask the blender used
+    owner_mask: np.ndarray    # (H, W) disjoint resolved mask
+    is_fallback: bool = False
+
+
+@dataclass
+class PipelineTrace:
+    """Everything needed to render the intermediate pipeline stages."""
+
+    original_shape: Tuple[int, int]
+    working_shape: Tuple[int, int]
+    L_full: np.ndarray        # (H, W) working-resolution luminance
+    regions: List[RegionTrace]
+    ab_blended: np.ndarray    # (H, W, 2)
+    rgb_final: np.ndarray     # (H_orig, W_orig, 3)
 
 
 class ColorizationPipeline:
@@ -80,6 +108,32 @@ class ColorizationPipeline:
         rgb:
             ``(H_orig, W_orig, 3)`` uint8 RGB.
         """
+        rgb, _ = self._run(L_full, decomp, original_shape, collect_trace=False)
+        return rgb
+
+    def run_traced(
+        self,
+        L_full: np.ndarray,
+        decomp: Decomposition,
+        original_shape: Optional[Tuple[int, int]] = None,
+    ) -> Tuple[np.ndarray, PipelineTrace]:
+        """Run the pipeline and also return the intermediate per-region results.
+
+        Same inputs and output image as :meth:`run`; the second return value
+        holds the per-region crops, expert predictions, masks, and blended
+        chrominance so they can be rendered afterwards.
+        """
+        rgb, trace = self._run(L_full, decomp, original_shape, collect_trace=True)
+        assert trace is not None
+        return rgb, trace
+
+    def _run(
+        self,
+        L_full: np.ndarray,
+        decomp: Decomposition,
+        original_shape: Optional[Tuple[int, int]],
+        collect_trace: bool,
+    ) -> Tuple[np.ndarray, Optional[PipelineTrace]]:
         H, W = L_full.shape[:2]
         working_shape = (H, W)
         orig_shape = original_shape or working_shape
@@ -104,13 +158,14 @@ class ColorizationPipeline:
         ab_canvases = []
         binary_masks = []
         crops = []
+        trace_regions: List[RegionTrace] = []
 
         with ExpertManager(
             self.registry,
             self.device,
             input_size=self.cfg.input_size,
         ) as manager:
-            for region in all_regions:
+            for index, region in enumerate(all_regions):
                 domain = region.domain
                 L_crop, crop = extractor.extract_input(L_full, region)
 
@@ -125,6 +180,25 @@ class ColorizationPipeline:
                 binary_masks.append(bin_mask)
                 crops.append(crop)
 
+                if collect_trace:
+                    is_fallback = index >= len(decomp.regions)
+                    owner_mask = (
+                        fallback_mask if is_fallback else decomp.resolved_mask(index)
+                    )
+                    trace_regions.append(
+                        RegionTrace(
+                            index=index,
+                            region=region,
+                            crop=crop,
+                            L_crop=L_crop,
+                            ab_pred=ab_pred,
+                            ab_canvas=ab_canvas,
+                            binary_mask=bin_mask,
+                            owner_mask=owner_mask,
+                            is_fallback=is_fallback,
+                        )
+                    )
+
         # Blend
         ab_blended = blender.blend(ab_canvases, binary_masks, crops)
 
@@ -135,7 +209,18 @@ class ColorizationPipeline:
             _upsample_L(L_full, orig_shape),
             ab_blended,
         )
-        return rgb
+
+        trace = None
+        if collect_trace:
+            trace = PipelineTrace(
+                original_shape=orig_shape,
+                working_shape=working_shape,
+                L_full=L_full,
+                regions=trace_regions,
+                ab_blended=ab_blended,
+                rgb_final=rgb,
+            )
+        return rgb, trace
 
 
 # ---------------------------------------------------------------------------

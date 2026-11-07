@@ -38,7 +38,7 @@ from colorize.experts import ExpertRegistry
 from colorize.pipeline import ColorizationPipeline
 from colorize.regions import Decomposition
 from colorize.routing import route
-from colorize.viz import overlay
+from colorize.viz import overlay, save_pipeline_stages
 
 
 DOMAIN_FILENAMES = {
@@ -71,6 +71,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--save-domain-map",
         action="store_true",
         help="Also save the routed domain overlay next to the output.",
+    )
+    parser.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Save the intermediate stages (decomposition, SAM masks, segments, "
+        "colorized segments, blend) as PNGs.",
+    )
+    parser.add_argument(
+        "--stages-dir",
+        default=None,
+        help="Directory for stage PNGs (default: <output-stem>_stages next to the output).",
     )
 
     # Checkpoints
@@ -256,16 +267,35 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"[routing] domain shares: {decomposition.domain_share}")
 
     pipeline = ColorizationPipeline(registry=registry, cfg=color_cfg, device=device)
-    rgb = pipeline.run(
-        L_full=L_full,
-        decomp=decomposition,
-        original_shape=original_shape,
-    )
-
     output_path = Path(args.output).expanduser() if args.output else default_output_path(args.image)
+
+    trace = None
+    if args.visualize:
+        rgb, trace = pipeline.run_traced(
+            L_full=L_full,
+            decomp=decomposition,
+            original_shape=original_shape,
+        )
+    else:
+        rgb = pipeline.run(
+            L_full=L_full,
+            decomp=decomposition,
+            original_shape=original_shape,
+        )
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(rgb).save(output_path)
     print(f"[output] {output_path}")
+
+    if args.visualize and trace is not None:
+        stages_dir = (
+            Path(args.stages_dir).expanduser()
+            if args.stages_dir
+            else output_path.with_name(f"{output_path.stem}_stages")
+        )
+        stage_paths = save_pipeline_stages(trace, decomposition, gray, stages_dir)
+        for name, path in stage_paths.items():
+            print(f"[stage] {name}: {path}")
 
     if args.save_domain_map:
         domain_map_path = output_path.with_name(f"{output_path.stem}_domains.png")
