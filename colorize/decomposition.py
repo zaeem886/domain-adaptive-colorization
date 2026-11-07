@@ -1,81 +1,107 @@
-"""Grounded-SAM wrapper (Hugging Face transformers).
+"""Region decomposition (report section 5.2.3): grayscale load and resize, one DINO
+pass, filtering, SAM box prompts, fragment merge, then routing.
 
-Grounding DINO turns the domain text prompts into boxes; SAM turns the boxes
-into masks. Models load once in __init__, so reuse one instance for many images.
+Grounding DINO comes from transformers; SAM from the original `segment_anything`
+package (the version tested in the earlier notebook). Models load lazily on first use.
 """
 import inspect
-from typing import List, Optional
+import os
+import urllib.request
+from typing import List, Optional, Tuple, Union
+
 import numpy as np
 from PIL import Image
 
 from .config import DecompConfig
+from .filtering import filter_detections, merge_same_label
 from .regions import Decomposition, Region
 from .routing import route
 
 
+def load_gray(source: Union[str, Image.Image], max_side: int = 1024) -> Image.Image:
+    """Step 1: read as single-channel grayscale; if the longer side exceeds max_side,
+    downscale with Lanczos keeping the aspect ratio. All masks live at this resolution."""
+    img = source.convert("L") if isinstance(source, Image.Image) else Image.open(source).convert("L")
+    if max(img.size) > max_side:
+        scale = max_side / max(img.size)
+        img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
+    return img
+
+
 class GroundedSAM:
     def __init__(self, cfg: Optional[DecompConfig] = None, device: Optional[str] = None):
-        import torch
-        from transformers import (AutoModelForZeroShotObjectDetection, AutoProcessor,
-                                  SamModel, SamProcessor)
         self.cfg = cfg or DecompConfig()
+        self._device = device
+        self._loaded = False
+
+    # ---- model loading ----------------------------------------------------
+    def _load(self) -> None:
+        if self._loaded:
+            return
+        import torch
+        from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+        from segment_anything import SamPredictor, sam_model_registry
+
         self.torch = torch
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.dino_proc = AutoProcessor.from_pretrained(self.cfg.dino_id)
         self.dino = AutoModelForZeroShotObjectDetection.from_pretrained(self.cfg.dino_id).to(self.device).eval()
-        self.sam_proc = SamProcessor.from_pretrained(self.cfg.sam_id)
-        self.sam = SamModel.from_pretrained(self.cfg.sam_id).to(self.device).eval()
+
+        if not os.path.exists(self.cfg.sam_checkpoint):
+            urllib.request.urlretrieve(self.cfg.sam_url, self.cfg.sam_checkpoint)
+        sam = sam_model_registry[self.cfg.sam_type](checkpoint=self.cfg.sam_checkpoint)
+        sam.to(device=self.device)
+        self.sam_predictor = SamPredictor(sam)
+        self._loaded = True
 
     @property
-    def text_prompt(self) -> str:
-        # Grounding DINO expects lowercase phrases, each ending with a period.
-        phrases = [p for group in self.cfg.prompts.values() for p in group]
-        return ". ".join(dict.fromkeys(p.lower() for p in phrases)) + "."
+    def caption(self) -> str:
+        """Step 2: one lowercase string, entries separated by a period, ending in a period."""
+        phrases = [p.lower().strip() for group in self.cfg.prompts.values() for p in group]
+        return " . ".join(dict.fromkeys(phrases)) + " ."
 
-    def _post_process(self, outputs, input_ids, size_hw):
-        # The argument name changed across transformers versions (box_threshold -> threshold).
-        fn = self.dino_proc.post_process_grounded_object_detection
-        kw = dict(text_threshold=self.cfg.text_threshold, target_sizes=[size_hw])
-        if "threshold" in inspect.signature(fn).parameters:
-            kw["threshold"] = self.cfg.box_threshold
-        else:
-            kw["box_threshold"] = self.cfg.box_threshold
-        return fn(outputs, input_ids, **kw)[0]
-
-    def detect(self, image: Image.Image) -> List[Region]:
-        """Return raw regions (label, score, box, mask). Domains are set by routing."""
+    # ---- the two model calls (overridden in tests) ------------------------
+    def _run_dino(self, rgb: Image.Image) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+        """Step 3: boxes (N,4 xyxy pixels), scores (N,), labels (N strings)."""
+        self._load()
         torch = self.torch
-        image = image.convert("RGB")
-        w, h = image.size
+        inputs = self.dino_proc(images=rgb, text=self.caption, return_tensors="pt").to(self.device)
         with torch.no_grad():
-            inputs = self.dino_proc(images=image, text=self.text_prompt, return_tensors="pt").to(self.device)
-            res = self._post_process(self.dino(**inputs), inputs.input_ids, (h, w))
-        labels = res.get("text_labels", res["labels"])
-        boxes = res["boxes"].cpu().numpy()
-        scores = res["scores"].cpu().numpy()
+            outputs = self.dino(**inputs)
+        fn = self.dino_proc.post_process_grounded_object_detection
+        kw = dict(text_threshold=self.cfg.text_threshold, target_sizes=[rgb.size[::-1]])
+        # The argument name changed across transformers versions (box_threshold -> threshold).
+        kw["threshold" if "threshold" in inspect.signature(fn).parameters else "box_threshold"] = self.cfg.box_threshold
+        res = fn(outputs, inputs.input_ids, **kw)[0]
+        labels = [str(x) for x in res.get("text_labels", res["labels"])]
+        return res["boxes"].cpu().numpy(), res["scores"].cpu().numpy(), labels
+
+    def _run_sam(self, rgb_array: np.ndarray, boxes: np.ndarray) -> List[np.ndarray]:
+        """Step 5: encode the image once, then one box prompt per region."""
+        self._load()
+        self.sam_predictor.set_image(rgb_array)
+        masks = []
+        for box in boxes:
+            m, _, _ = self.sam_predictor.predict(box=np.array(box), multimask_output=False)
+            masks.append(m[0].astype(bool))
+        return masks
+
+    # ---- the stage --------------------------------------------------------
+    def detect(self, gray: Image.Image) -> List[Region]:
+        """Steps 2 to 6 on an already-loaded grayscale image. Domains are set by routing."""
+        rgb = gray.convert("RGB")   # three identical channels: the models expect RGB input
+        boxes, scores, labels = self._run_dino(rgb)
         if len(boxes) == 0:
             return []
+        keep = filter_detections(boxes, scores, labels, self.cfg.min_score, self.cfg.nms_iou)
+        if not keep:
+            return []
+        masks = self._run_sam(np.array(rgb), boxes[keep])
+        regions = [Region(label=labels[i], score=float(scores[i]), box=boxes[i].astype(float), mask=m)
+                   for i, m in zip(keep, masks)]
+        return merge_same_label(regions, self.cfg.merge_containment)
 
-        keep = np.argsort(-scores)[: self.cfg.max_boxes]
-        boxes, scores = boxes[keep], scores[keep]
-        labels = [str(labels[i]) for i in keep]
-
-        with torch.no_grad():
-            sam_in = self.sam_proc(image, input_boxes=[boxes.tolist()], return_tensors="pt").to(self.device)
-            out = self.sam(**sam_in, multimask_output=False)
-            masks = self.sam_proc.image_processor.post_process_masks(
-                out.pred_masks.cpu(), sam_in["original_sizes"].cpu(), sam_in["reshaped_input_sizes"].cpu()
-            )[0]
-        masks = masks[:, 0].numpy().astype(bool)   # (N, H, W)
-
-        min_area = self.cfg.min_area_frac * h * w
-        return [
-            Region(label=lab, score=float(sc), box=bx.astype(float), mask=m)
-            for lab, sc, bx, m in zip(labels, scores, boxes, masks)
-            if m.sum() >= min_area
-        ]
-
-    def __call__(self, image: Image.Image) -> Decomposition:
-        regions = self.detect(image)
-        w, h = image.size
-        return route(regions, (h, w), self.cfg)
+    def __call__(self, image: Union[str, Image.Image]) -> Decomposition:
+        gray = load_gray(image, self.cfg.max_side)
+        regions = self.detect(gray)
+        return route(regions, (gray.height, gray.width), self.cfg)

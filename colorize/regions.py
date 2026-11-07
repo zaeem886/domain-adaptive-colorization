@@ -1,5 +1,5 @@
 """Shared region record: the contract between decomposition, routing and extraction."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 
@@ -26,6 +26,7 @@ class Decomposition:
     domain_map: np.ndarray             # (H, W) int8: index into `domains`, never -1
     coverage: float                    # fraction of pixels owned by some region
     domain_share: Dict[str, float]     # fraction of pixels per domain (sums to 1)
+    discarded: List[Region] = field(default_factory=list)  # regions whose label could not be routed
 
     def domain_mask(self, domain: str) -> np.ndarray:
         """Boolean mask of the pixels assigned to a domain (after overlap resolution)."""

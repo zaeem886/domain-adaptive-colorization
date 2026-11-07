@@ -18,16 +18,18 @@ def build_label_table(prompts: Dict[str, List[str]]) -> Dict[str, str]:
     return table
 
 
-def label_to_domain(label: str, table: Dict[str, str]) -> Optional[str]:
-    """Map a detector label to a domain, or None if nothing matches.
+def label_to_domain(label: str, table: Dict[str, str], split_merged: bool = False) -> Optional[str]:
+    """Map a detector label to a domain, or None if it cannot be routed.
 
-    Grounding DINO sometimes merges neighbouring phrases into one label
-    (e.g. "person face"). Those are split by phrase matching and the most
-    common domain wins; ties go to the first matching phrase in the table.
+    Report section 5.3.1: a label that does not match exactly one prompt is not routed.
+    With split_merged=True, a merged label such as "person face" is split by phrase
+    matching and the most common domain wins (ties: first match in the table).
     """
     label = label.lower().strip()
     if label in table:
         return table[label]
+    if not split_merged:
+        return None
     votes: Counter = Counter()
     for phrase, domain in table.items():
         if re.search(rf"\b{re.escape(phrase)}\b", label):
@@ -55,25 +57,36 @@ def resolve_overlaps(regions: Sequence[Region], shape: Tuple[int, int], rule: st
 
 
 def route(regions: List[Region], shape: Tuple[int, int], cfg: Optional[DecompConfig] = None) -> Decomposition:
-    """Assign domains, resolve overlaps and send uncovered pixels to the fallback."""
+    """Assign domains, discard unroutable regions, resolve overlaps, apply the fallback.
+
+    Unroutable regions are discarded before overlap resolution, so their pixels count
+    as uncovered and go to the fallback (section 5.3.1 and 5.3.3).
+    """
     cfg = cfg or DecompConfig()
     for r in regions:
         if r.mask.shape != tuple(shape):
             raise ValueError(f"mask shape {r.mask.shape} does not match image shape {tuple(shape)}")
 
     table = build_label_table(cfg.prompts)
+    routed: List[Region] = []
+    discarded: List[Region] = []
     for r in regions:
-        r.domain = label_to_domain(r.label, table) or cfg.fallback
+        domain = label_to_domain(r.label, table, cfg.split_merged_labels)
+        if domain is None:
+            discarded.append(r)
+        else:
+            r.domain = domain
+            routed.append(r)
 
     domains = cfg.domain_order
     fb_idx = domains.index(cfg.fallback)
-    owner = resolve_overlaps(regions, shape, cfg.overlap_rule)
+    owner = resolve_overlaps(routed, shape, cfg.overlap_rule)
 
     domain_map = np.full(shape, fb_idx, dtype=np.int8)
-    for i, r in enumerate(regions):
+    for i, r in enumerate(routed):
         domain_map[owner == i] = domains.index(r.domain)
 
     coverage = float((owner >= 0).mean())
     total = domain_map.size
     share = {d: float((domain_map == k).sum()) / total for k, d in enumerate(domains)}
-    return Decomposition(tuple(shape), regions, domains, owner, domain_map, coverage, share)
+    return Decomposition(tuple(shape), routed, domains, owner, domain_map, coverage, share, discarded)
