@@ -1,0 +1,15 @@
+# Person B Requirements: Region Extraction, Expert Colorization, Soft Blending & Reconstruction
+# (Does NOT include Person A libraries: segment-anything, transformers, timm, einops)
+
+# Core numerical, image processing, and color space conversion
+numpy>=1.22.0
+scipy>=1.9.0
+opencv-python>=4.6.0
+Pillow>=9.0.0
+scikit-image>=0.19.0
+
+# Deep Learning framework for expert inference (colorize/experts.py)
+torch>=2.0.0
+
+# Optional: required only when running live DDColor checkpoints via ExpertManager
+# ddcolor
