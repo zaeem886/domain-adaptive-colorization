@@ -1,4 +1,9 @@
 # ==============================================================================
+# LEGACY: superseded by kaggle_pipeline.ipynb
+# This file is an older copy-paste version of kaggle_notebook.ipynb (manual-test
+# workflow). Kept for reference only; do not use for new runs.
+# ==============================================================================
+#
 # Domain-Adaptive Colorization: Kaggle Notebook Cells
 #
 # IMPORTANT SETTINGS in Kaggle (right panel):
@@ -27,7 +32,7 @@ else:
 # ------------------------------------------------------------------------------
 # Cell 3: Run Unit Tests (Person A & Person B Handover)
 # ------------------------------------------------------------------------------
-!PYTHONPATH=. python tests/run_tests.py
+!PYTHONPATH=. python -m pytest -q tests
 
 # ------------------------------------------------------------------------------
 # Cell 4: Run Interactive Pipeline Simulation (Manual Test)
