@@ -54,6 +54,8 @@ DOMAIN_FILENAMES = {
 # CLI
 # ---------------------------------------------------------------------------
 
+# parser to parse command line arguments ig
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the domain-adaptive (MoE) colorization pipeline end to end.",
@@ -203,6 +205,7 @@ def default_output_path(image_path: str) -> Path:
     return Path("outputs") / f"{stem}_colorized.png"
 
 
+# loads an image from the specified image path
 def load_input(image_path: str, max_side: int) -> Tuple[Image.Image, np.ndarray, Tuple[int, int]]:
     """Return the working grayscale image, its L channel in [0, 100], and the original shape."""
     gray = load_gray(image_path, max_side=max_side)
@@ -212,6 +215,7 @@ def load_input(image_path: str, max_side: int) -> Tuple[Image.Image, np.ndarray,
     return gray, L_full, original_shape
 
 
+# runs the decomposition shit on the specified input image
 def decompose(
     gray: Image.Image,
     decomp_cfg: DecompConfig,
@@ -221,6 +225,8 @@ def decompose(
     """Run Person A (Grounded-SAM + routing), or build a full fallback decomposition."""
     if skip_detection:
         return route([], (gray.height, gray.width), decomp_cfg)
+
+    # the groundedSAM does the actual heavy lifting of decomposition
     return GroundedSAM(cfg=decomp_cfg, device=device)(gray)
 
 
@@ -231,6 +237,7 @@ def decompose(
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
+    # manages the DDcolor path stuff
     if args.ddcolor_path:
         ddcolor_path = str(Path(args.ddcolor_path).expanduser().resolve())
         if not Path(ddcolor_path).is_dir():
@@ -239,6 +246,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     device = resolve_device(args.device)
 
+    # managing configurations for decompositon and colorization
     decomp_cfg = DecompConfig(
         sam_checkpoint=args.sam_checkpoint,
         max_side=args.max_side,
@@ -259,6 +267,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     gray, L_full, original_shape = load_input(args.image, args.max_side)
     print(f"[image]  working={gray.size[::-1]}  original={original_shape}")
 
+    # decomposing the input grayscale image
     decomposition = decompose(gray, decomp_cfg, device, args.skip_detection)
     print(
         f"[routing] regions={len(decomposition.regions)}  "
@@ -266,11 +275,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     print(f"[routing] domain shares: {decomposition.domain_share}")
 
+    # note that decomposition is a separate part from the colorization pipeline
     pipeline = ColorizationPipeline(registry=registry, cfg=color_cfg, device=device)
     output_path = Path(args.output).expanduser() if args.output else default_output_path(args.image)
 
     trace = None
+
+    # once decomposition is done, we run the colorization pipeline
     if args.visualize:
+        # this just runs a traced version,(displays intermediate stages as well)
         rgb, trace = pipeline.run_traced(
             L_full=L_full,
             decomp=decomposition,
@@ -283,6 +296,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             original_shape=original_shape,
         )
 
+    # the rest of this code is just output and saving stuff, no "real work" being done here
     output_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(rgb).save(output_path)
     print(f"[output] {output_path}")

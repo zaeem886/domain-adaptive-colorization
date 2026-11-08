@@ -60,6 +60,7 @@ class PipelineTrace:
     rgb_final: np.ndarray     # (H_orig, W_orig, 3)
 
 
+# manages the entire colorization pipeline
 class ColorizationPipeline:
     """End-to-end MoE colorization pipeline (Experiment E4).
 
@@ -108,6 +109,8 @@ class ColorizationPipeline:
         rgb:
             ``(H_orig, W_orig, 3)`` uint8 RGB.
         """
+
+        # wow just calls another function
         rgb, _ = self._run(L_full, decomp, original_shape, collect_trace=False)
         return rgb
 
@@ -127,6 +130,7 @@ class ColorizationPipeline:
         assert trace is not None
         return rgb, trace
 
+    # this is the ACTUAL run function
     def _run(
         self,
         L_full: np.ndarray,
@@ -138,6 +142,7 @@ class ColorizationPipeline:
         working_shape = (H, W)
         orig_shape = original_shape or working_shape
 
+        # initialize the extractor and blender classes
         extractor = RegionExtractor(self.cfg, working_shape)
         blender = Blender(self.cfg, working_shape)
 
@@ -160,6 +165,7 @@ class ColorizationPipeline:
         crops = []
         trace_regions: List[RegionTrace] = []
 
+        # route each region to its own expert
         with ExpertManager(
             self.registry,
             self.device,
@@ -180,6 +186,7 @@ class ColorizationPipeline:
                 binary_masks.append(bin_mask)
                 crops.append(crop)
 
+                # more tracing stuff (just collecting the intermediate resultks)
                 if collect_trace:
                     is_fallback = index >= len(decomp.regions)
                     owner_mask = (

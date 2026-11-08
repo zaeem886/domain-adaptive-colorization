@@ -47,6 +47,7 @@ class Blender:
     # σ_k formula
     # ------------------------------------------------------------------
 
+    # sigma sigma boi sigma boi sigma boi
     def sigma_for_region(self, crop: CropBox) -> float:
         """Compute the per-region smoothing width.
 
