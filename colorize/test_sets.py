@@ -14,9 +14,10 @@ Test set overview
 """
 from __future__ import annotations
 
-import os
+import argparse
+import json
 from pathlib import Path
-from typing import Dict, List, Tuple, Union
+from typing import Any, Dict, Iterable, List, Mapping, Tuple, Union
 
 # ---------------------------------------------------------------------------
 # Fixed COCO val2017 image ID lists
@@ -68,7 +69,7 @@ SEGMENTATION_SET_IDS: List[int] = [
 
 #: 20 COCO val2017 image IDs for region-crop evaluation.
 REGION_CROP_IDS: List[int] = [
-    697, 1060, 1423, 1786, 2149,
+    697, 1060, 1423, 1786, 2148,
     2512, 2875, 3238, 3601, 3964,
     4327, 4690, 5053, 5416, 5779,
     6142, 6505, 6868, 7231, 7594,
@@ -83,6 +84,212 @@ ALL_TEST_IDS: List[int] = sorted(
         + REGION_CROP_IDS
     )
 )
+
+# COCO instance/Stuff categories used to verify the four domain lists.  The
+# mapping accepts the names used by either ``instances_val2017.json`` or a
+# COCO-Stuff annotation export.  It is intentionally kept next to the fixed
+# IDs, so a manifest records the exact policy used to accept an image.
+COCO_DOMAIN_CATEGORIES: Dict[str, Tuple[str, ...]] = {
+    "people": ("person",),
+    "nature": (
+        "potted plant", "plant", "tree", "vegetation", "grass", "sky",
+        "mountain", "water", "sea", "river", "lake", "cloud", "snow",
+        "sand", "rock",
+    ),
+    "urban": (
+        "bicycle", "car", "motorcycle", "bus", "train", "truck",
+        "traffic light", "fire hydrant", "stop sign", "parking meter",
+        "bench", "building", "road", "sidewalk", "street", "bridge",
+        "wall", "house", "skyscraper",
+    ),
+    "animals": (
+        "bird", "cat", "dog", "horse", "sheep", "cow", "elephant",
+        "bear", "zebra", "giraffe", "animal",
+    ),
+}
+
+
+def _all_set_memberships() -> Dict[int, List[str]]:
+    """Return every fixed-set membership for duplicate and manifest checks."""
+    memberships: Dict[int, List[str]] = {}
+    for set_name, ids in (
+        [(f"domain_{domain}", domain_ids) for domain, domain_ids in DOMAIN_SET_IDS.items()]
+        + [
+            ("mixed_scene", MIXED_SCENE_IDS),
+            ("segmentation", SEGMENTATION_SET_IDS),
+            ("region_crop", REGION_CROP_IDS),
+        ]
+    ):
+        for image_id in ids:
+            memberships.setdefault(int(image_id), []).append(set_name)
+    return memberships
+
+
+def find_duplicate_ids() -> Dict[int, List[str]]:
+    """Return IDs occurring in more than one fixed test set.
+
+    The result is empty for the checked-in lists.  Keeping this as a public
+    check makes accidental overlap visible before an experiment is run.
+    """
+    return {
+        image_id: set_names
+        for image_id, set_names in _all_set_memberships().items()
+        if len(set_names) > 1
+    }
+
+
+def _load_coco_annotations(annotation_file: Union[str, Path]) -> Mapping[str, Any]:
+    """Load a COCO annotation JSON with a useful error for the CLI/callers."""
+    path = Path(annotation_file)
+    if not path.is_file():
+        raise FileNotFoundError(f"COCO annotation file not found: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid COCO annotation JSON: {path}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("images"), list):
+        raise ValueError(
+            "COCO annotations must be an object containing an 'images' list"
+        )
+    if not isinstance(data.get("categories"), list) or not isinstance(
+        data.get("annotations"), list
+    ):
+        raise ValueError(
+            "COCO annotations must contain 'categories' and 'annotations' lists"
+        )
+    return data
+
+
+def _category_names_by_image(data: Mapping[str, Any]) -> Dict[int, List[str]]:
+    """Index COCO instance category names by image ID."""
+    category_names = {
+        int(category["id"]): str(category["name"])
+        for category in data["categories"]
+        if isinstance(category, dict) and "id" in category and "name" in category
+    }
+    by_image: Dict[int, set[str]] = {}
+    for annotation in data["annotations"]:
+        if not isinstance(annotation, dict):
+            continue
+        if "image_id" not in annotation or "category_id" not in annotation:
+            continue
+        name = category_names.get(int(annotation["category_id"]))
+        if name is not None:
+            by_image.setdefault(int(annotation["image_id"]), set()).add(name.lower().strip())
+    return {image_id: sorted(names) for image_id, names in by_image.items()}
+
+
+def validate_coco_ids(
+    annotation_file: Union[str, Path],
+    domain_categories: Mapping[str, Iterable[str]] = COCO_DOMAIN_CATEGORIES,
+) -> Dict[str, Any]:
+    """Validate fixed IDs against a COCO instances annotation file.
+
+    This check verifies that every fixed ID exists in ``images`` and that each
+    domain image contains at least one COCO instance from the configured
+    domain category mapping.  It also reports duplicate IDs across all fixed
+    sets.  No third-party COCO package is required.
+
+    The returned dictionary is JSON serialisable and is suitable for saving as
+    an audit manifest.  ``report["valid"]`` is false when any image is
+    missing, a domain image has no matching category, or sets overlap.
+    """
+    data = _load_coco_annotations(annotation_file)
+    image_ids = {
+        int(image["id"])
+        for image in data["images"]
+        if isinstance(image, dict) and "id" in image
+    }
+    image_metadata = {
+        int(image["id"]): {
+            key: image[key]
+            for key in ("file_name", "width", "height")
+            if key in image
+        }
+        for image in data["images"]
+        if isinstance(image, dict) and "id" in image
+    }
+    categories_by_image = _category_names_by_image(data)
+    normalized_categories = {
+        domain: sorted({str(name).lower().strip() for name in categories})
+        for domain, categories in domain_categories.items()
+    }
+    memberships = _all_set_memberships()
+
+    domain_report: Dict[str, Any] = {}
+    missing_image_ids: List[int] = []
+    records: Dict[str, Any] = {}
+    for domain, ids in DOMAIN_SET_IDS.items():
+        expected = set(normalized_categories.get(domain, []))
+        mismatches: List[int] = []
+        for image_id in ids:
+            image_id = int(image_id)
+            if image_id not in image_ids:
+                missing_image_ids.append(image_id)
+            categories = categories_by_image.get(image_id, [])
+            matched = sorted(set(categories).intersection(expected))
+            if image_id not in image_ids or not matched:
+                mismatches.append(image_id)
+            records[str(image_id)] = {
+                "image_id": image_id,
+                "sets": memberships[image_id],
+                "categories": categories,
+                "matched_domains": [domain] if matched else [],
+                **image_metadata.get(image_id, {}),
+            }
+        domain_report[domain] = {
+            "expected_categories": sorted(expected),
+            "image_ids": [int(image_id) for image_id in ids],
+            "mismatches": mismatches,
+            "valid": not mismatches,
+        }
+
+    # Add metadata for auxiliary sets as well, so the manifest covers every
+    # fixed ID and can be inspected without opening the COCO JSON again.
+    for image_id, set_names in memberships.items():
+        records.setdefault(
+            str(image_id),
+            {
+                "image_id": image_id,
+                "sets": set_names,
+                "categories": categories_by_image.get(image_id, []),
+                **image_metadata.get(image_id, {}),
+            },
+        )
+
+    duplicate_ids = find_duplicate_ids()
+    missing_image_ids = sorted(set(missing_image_ids))
+    report: Dict[str, Any] = {
+        "annotation_file": str(Path(annotation_file)),
+        "annotation_format": "COCO instances",
+        "domain_categories": normalized_categories,
+        "domains": domain_report,
+        "missing_image_ids": missing_image_ids,
+        "duplicate_ids": {str(k): v for k, v in sorted(duplicate_ids.items())},
+        "images": [records[key] for key in sorted(records, key=int)],
+    }
+    report["valid"] = not (
+        missing_image_ids
+        or any(domain_report[domain]["mismatches"] for domain in domain_report)
+        or duplicate_ids
+    )
+    return report
+
+
+def write_coco_metadata_manifest(
+    annotation_file: Union[str, Path],
+    output_file: Union[str, Path],
+    domain_categories: Mapping[str, Iterable[str]] = COCO_DOMAIN_CATEGORIES,
+) -> Dict[str, Any]:
+    """Validate COCO IDs and write the JSON audit manifest to *output_file*."""
+    report = validate_coco_ids(annotation_file, domain_categories)
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return report
 
 # ---------------------------------------------------------------------------
 # COCO path helpers
@@ -173,4 +380,50 @@ def load_test_set(
         (img_id, get_coco_image_path(img_id, coco_root, split))
         for img_id in ids
     ]
+
+
+def _main(argv: Union[None, List[str]] = None) -> int:
+    """Command-line entry point for COCO ID validation and manifest export."""
+    parser = argparse.ArgumentParser(
+        description="Validate the fixed colorization test IDs against COCO annotations."
+    )
+    parser.add_argument(
+        "--annotations",
+        required=True,
+        help="Path to instances_val2017.json (or another COCO instances JSON).",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        help="Optional output path for the JSON validation manifest.",
+    )
+    args = parser.parse_args(argv)
+
+    report = (
+        write_coco_metadata_manifest(args.annotations, args.manifest)
+        if args.manifest
+        else validate_coco_ids(args.annotations)
+    )
+    status = "PASS" if report["valid"] else "FAIL"
+    mismatch_count = sum(
+        len(domain_report["mismatches"])
+        for domain_report in report["domains"].values()
+    )
+    print(
+        f"{status}: {len(report['images'])} fixed IDs checked; "
+        f"{len(report['missing_image_ids'])} missing images; "
+        f"{mismatch_count} domain mismatches"
+    )
+    for domain, domain_report in report["domains"].items():
+        print(
+            f"  {domain}: {'PASS' if domain_report['valid'] else 'FAIL'} "
+            f"({len(domain_report['mismatches'])} mismatches)"
+        )
+    if report["duplicate_ids"]:
+        print(f"  duplicate IDs: {report['duplicate_ids']}")
+    return 0 if report["valid"] else 1
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through subprocesses
+    raise SystemExit(_main())
 

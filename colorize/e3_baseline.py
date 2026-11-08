@@ -79,9 +79,16 @@ def colorize_whole_image(
     RuntimeError
         If PyTorch or the DDColor package cannot be imported.
     """
+    L_full = np.asarray(L_full, dtype=np.float32)
+    if L_full.ndim != 2:
+        raise ValueError(f"L_full must be a 2-D array, got shape {L_full.shape}")
+    if not np.isfinite(L_full).all():
+        raise ValueError("L_full must contain only finite values")
+    if input_size <= 0:
+        raise ValueError(f"input_size must be positive, got {input_size}")
+
     try:
         import torch
-        import torch.nn as nn
     except ImportError as exc:
         raise RuntimeError(
             "PyTorch is required for E3 baseline colorisation. "

@@ -21,7 +21,8 @@ from .metrics import (
 from .results import ResultsRecord, save_results, load_results, append_result, records_to_dataframe
 from .test_sets import (
     DOMAIN_SET_IDS, MIXED_SCENE_IDS, SEGMENTATION_SET_IDS, REGION_CROP_IDS,
-    ALL_TEST_IDS, get_coco_image_path, load_test_set,
+    ALL_TEST_IDS, COCO_DOMAIN_CATEGORIES, get_coco_image_path, load_test_set,
+    find_duplicate_ids, validate_coco_ids, write_coco_metadata_manifest,
 )
 from .plotting import (
     plot_metric_bar, plot_metric_comparison, plot_confusion_matrix,
@@ -46,7 +47,8 @@ __all__ = [
     "compute_miou", "compute_pixel_coverage", "compute_routing_accuracy", "compute_confusion_matrix",
     "ResultsRecord", "save_results", "load_results", "append_result", "records_to_dataframe",
     "DOMAIN_SET_IDS", "MIXED_SCENE_IDS", "SEGMENTATION_SET_IDS", "REGION_CROP_IDS",
-    "ALL_TEST_IDS", "get_coco_image_path", "load_test_set",
+    "ALL_TEST_IDS", "COCO_DOMAIN_CATEGORIES", "get_coco_image_path", "load_test_set",
+    "find_duplicate_ids", "validate_coco_ids", "write_coco_metadata_manifest",
     "plot_metric_bar", "plot_metric_comparison", "plot_confusion_matrix",
     "plot_colorfulness_distribution", "plot_delta_e_map",
 ]
