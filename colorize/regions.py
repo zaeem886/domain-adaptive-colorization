@@ -38,7 +38,14 @@ class Decomposition:
 
 
 def save_decomposition(d: Decomposition, path: str) -> None:
-    """Save a decomposition so later stages and experiments can reload it."""
+    """Save a decomposition so later stages and experiments can reload it.
+
+    The routed regions are stored by metadata plus the ``owner`` map.  Raw SAM
+    masks are deliberately not persisted because they can be large; this is
+    enough for evaluation, which uses the resolved masks (owner == region
+    index).  Discarded regions are stored as a count and their labels so E1/E2
+    can report how many detections routing could not place.
+    """
     boxes = np.stack([r.box for r in d.regions]) if d.regions else np.zeros((0, 4))
     np.savez_compressed(
         path,
@@ -49,4 +56,85 @@ def save_decomposition(d: Decomposition, path: str) -> None:
         region_domains=np.array([r.domain for r in d.regions], dtype=str),
         scores=np.array([r.score for r in d.regions], dtype=float),
         boxes=boxes,
+        n_discarded=np.array(len(d.discarded), dtype=np.int32),
+        discarded_labels=np.array([r.label for r in d.discarded], dtype=str),
+    )
+
+
+def load_decomposition(path: str) -> Decomposition:
+    """Load a decomposition written by :func:`save_decomposition`.
+
+    Only the routed region metadata and the owner map are available on disk.
+    Each routed region therefore gets ``mask = (owner == index)``, i.e. its
+    resolved mask, not the original raw SAM mask.  E2 relies on this resolved
+    mask; callers that need raw masks must re-run SAM.
+
+    Discarded regions are reconstructed with their label only: their boxes and
+    scores are not persisted, and their masks are empty.  This is sufficient
+    for the counts and labels reported by E1/E2.
+    """
+    with np.load(path, allow_pickle=False) as data:
+        owner = np.asarray(data["owner"])
+        shape = tuple(int(v) for v in owner.shape)
+        domains = tuple(str(v) for v in data["domains"].tolist())
+        domain_map = np.asarray(data["domain_map"])
+
+        labels = [str(v) for v in data["labels"].tolist()] if "labels" in data.files else []
+        region_domains = (
+            [str(v) for v in data["region_domains"].tolist()]
+            if "region_domains" in data.files
+            else [None] * len(labels)
+        )
+        scores = (
+            np.asarray(data["scores"], dtype=float)
+            if "scores" in data.files
+            else np.zeros(len(labels), dtype=float)
+        )
+        boxes = (
+            np.asarray(data["boxes"], dtype=float)
+            if "boxes" in data.files
+            else np.zeros((len(labels), 4), dtype=float)
+        )
+        n_discarded = int(np.asarray(data["n_discarded"]).item()) if "n_discarded" in data.files else 0
+        discarded_labels = (
+            [str(v) for v in data["discarded_labels"].tolist()]
+            if "discarded_labels" in data.files
+            else []
+        )
+
+    regions = [
+        Region(
+            label=labels[i],
+            score=float(scores[i]),
+            box=np.asarray(boxes[i], dtype=float),
+            mask=(owner == i),
+            domain=None if region_domains[i] == "None" else region_domains[i],
+        )
+        for i in range(len(labels))
+    ]
+    discarded = [
+        Region(
+            label=discarded_labels[i],
+            score=float("nan"),
+            box=np.zeros(4, dtype=float),
+            mask=np.zeros(shape, dtype=bool),
+        )
+        for i in range(min(n_discarded, len(discarded_labels)))
+    ]
+
+    covered = int((owner >= 0).sum())
+    total = int(owner.size)
+    domain_share = {
+        name: float((domain_map == index).sum()) / total if total else float("nan")
+        for index, name in enumerate(domains)
+    }
+    return Decomposition(
+        shape=shape,
+        regions=regions,
+        domains=domains,
+        owner=owner,
+        domain_map=domain_map,
+        coverage=float(covered / total) if total else float("nan"),
+        domain_share=domain_share,
+        discarded=discarded,
     )

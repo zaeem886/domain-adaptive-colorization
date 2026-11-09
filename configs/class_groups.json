@@ -1,0 +1,61 @@
+{
+  "_comment": [
+    "TEAM MUST CONFIRM THIS MAPPING: it determines every E1 and E2 number.",
+    "Groups are the scoring units for E1. Classes not listed here are IGNORED.",
+    "prompt_to_group maps detector prompt labels to those groups. The prompts",
+    "'person' and 'face' both predict the person group because COCO-Stuff has",
+    "no face class; 'vegetation' and 'tree' both predict vegetation.",
+    "Class names must match the COCO-Stuff label-name file exactly.",
+    "Domains must be one of: people, nature, urban, animals."
+  ],
+  "groups": {
+    "person": {
+      "domain": "people",
+      "classes": ["person"]
+    },
+    "animal": {
+      "domain": "animals",
+      "classes": [
+        "bird",
+        "cat",
+        "dog",
+        "horse",
+        "sheep",
+        "cow",
+        "elephant",
+        "bear",
+        "zebra",
+        "giraffe"
+      ]
+    },
+    "sky": {
+      "domain": "nature",
+      "classes": ["sky-other", "clouds"]
+    },
+    "vegetation": {
+      "domain": "nature",
+      "classes": [
+        "tree",
+        "grass",
+        "bush",
+        "plant-other",
+        "flower",
+        "leaves",
+        "branch"
+      ]
+    },
+    "building": {
+      "domain": "urban",
+      "classes": ["building-other", "house", "roof", "skyscraper"]
+    }
+  },
+  "prompt_to_group": {
+    "person": "person",
+    "face": "person",
+    "sky": "sky",
+    "vegetation": "vegetation",
+    "tree": "vegetation",
+    "building": "building",
+    "animal": "animal"
+  }
+}

@@ -1,3 +1,15 @@
+# Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# E1/E2 model caches and bulky generated outputs.
+# Small CSV/JSON result files may be committed; raw check-data images are not.
+cache/
+results/check_data/
+notebooks/.ipynb_checkpoints/
+
+# Local archives / downloaded checkpoints
+*.zip
+*.pth
+
