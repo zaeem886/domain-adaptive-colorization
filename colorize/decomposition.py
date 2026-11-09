@@ -35,6 +35,7 @@ class GroundedSAM:
         self._loaded = False
 
     # ---- model loading ----------------------------------------------------
+    # just loads the model
     def _load(self) -> None:
         if self._loaded:
             return
@@ -73,7 +74,8 @@ class GroundedSAM:
         # The argument name changed across transformers versions (box_threshold -> threshold).
         kw["threshold" if "threshold" in inspect.signature(fn).parameters else "box_threshold"] = self.cfg.box_threshold
         res = fn(outputs, inputs.input_ids, **kw)[0]
-        labels = [str(x) for x in res.get("text_labels", res["labels"])]
+        raw_labels = res["text_labels"] if "text_labels" in res else res["labels"]
+        labels = [str(x) for x in raw_labels]
         return res["boxes"].cpu().numpy(), res["scores"].cpu().numpy(), labels
 
     def _run_sam(self, rgb_array: np.ndarray, boxes: np.ndarray) -> List[np.ndarray]:
@@ -90,17 +92,27 @@ class GroundedSAM:
     def detect(self, gray: Image.Image) -> List[Region]:
         """Steps 2 to 6 on an already-loaded grayscale image. Domains are set by routing."""
         rgb = gray.convert("RGB")   # three identical channels: the models expect RGB input
+
+        # we first run dino
         boxes, scores, labels = self._run_dino(rgb)
         if len(boxes) == 0:
             return []
+
+        # filter detections function manages what boxes to keep and what to discard. 
+        # MODIFY THIS FUNCTION TO MANAGE HOW DETECTIONS ARE FILTERED
         keep = filter_detections(boxes, scores, labels, self.cfg.min_score, self.cfg.nms_iou)
         if not keep:
             return []
+
+        # we then run the sam model on the filtered detections
         masks = self._run_sam(np.array(rgb), boxes[keep])
         regions = [Region(label=labels[i], score=float(scores[i]), box=boxes[i].astype(float), mask=m)
                    for i, m in zip(keep, masks)]
+
+        # we decide wether or not to merge certain regions
         return merge_same_label(regions, self.cfg.merge_containment)
 
+    # this function is called externally (samajh hi gaye ho ge kese chalta ye sab kuch)
     def __call__(self, image: Union[str, Image.Image]) -> Decomposition:
         gray = load_gray(image, self.cfg.max_side)
         regions = self.detect(gray)

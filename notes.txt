@@ -1,0 +1,59 @@
+DOMAIN-ADAPTIVE COLORIZATION — PROJECT NOTES
+============================================
+
+Notebooks
+---------
+ACTIVE
+  kaggle_pipeline.ipynb
+    - Import THIS notebook into Kaggle.
+    - Clones branch B, installs dependencies, runs the pytest suite, clones
+      DDColor and downloads the DDColor-T checkpoint, then runs:
+          python main.py --visualize --stages-dir outputs/stages
+    - Displays the stage PNGs in order: decomposition, SAM masks, segments,
+      colorized segments, and the final blend.
+
+LEGACY — do not use for new runs (superseded by kaggle_pipeline.ipynb)
+  kaggle_notebook.ipynb
+  kaggle_notebook_cells.py
+    - Older manual-test workflow (manual_test.py + 4-panel demo image).
+    - Kept for reference only; content is a parallel copy and may drift from
+      the current pipeline.
+
+Tests
+-----
+Framework: pytest (single format for the whole suite).
+Location:  tests/
+  test_routing.py        Person A: labels, fallback, overlap rules   (20 tests)
+  test_colorization.py   Person B: extraction, blending, config      (31 tests)
+  test_integration.py    Person A -> Person B handover               (1 test)
+  conftest.py            puts the repository root on sys.path
+
+Run from the repository root:
+  python3 -m pytest -q                          # all tests (~52)
+  python3 -m pytest -q tests/test_routing.py
+  python3 -m pytest -q tests/test_colorization.py
+  python3 -m pytest -q tests/test_integration.py
+
+Or from the tests/ directory:
+  cd tests && python3 -m pytest -q
+
+On Kaggle (after the clone cell):
+  !PYTHONPATH=. python -m pytest -q tests
+
+No GPU, torch, OpenCV, scikit-image, or model weights are required for tests.
+pytest.ini sets testpaths = tests, so a bare `pytest` stays inside tests/.
+
+Pipeline entry point
+--------------------
+  python3 main.py --image pics/dog.jpeg \
+      --single-checkpoint /path/to/ddcolor_paper_tiny.pth \
+      --ddcolor-path /path/to/DDColor \
+      --output outputs/result.png \
+      --visualize --stages-dir outputs/stages
+
+Notes
+-----
+- run_tests.py and test_all.py were removed: they duplicated
+  test_colorization.py and test_routing.py in unittest form.
+- Stage images are written to outputs/stages/ (override with --stages-dir).
+- manual_test.py is a manual demo script, not part of the pytest suite.
