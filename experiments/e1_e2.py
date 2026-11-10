@@ -76,6 +76,9 @@ from colorize.seg_eval import (
     summarize_routing,
 )
 
+# The five settings chosen by `tune`, in the order they are swept.
+# The sweep changes one setting at a time, so earlier choices stay fixed while
+# later settings are tried.
 PARAMETER_ORDER = (
     "box_threshold",
     "text_threshold",
@@ -84,6 +87,11 @@ PARAMETER_ORDER = (
     "merge_containment",
 )
 
+# Candidate values tried for each setting.
+# This is a one-pass "coordinate" sweep, not every possible combination:
+#   5 + 3 + 3 + 3 + 3 = 17 settings are scored per tuning image.
+# Pass --box-threshold-grid etc. to widen a grid if the best value lands on an
+# edge (which suggests the useful range continues outside the default grid).
 DEFAULT_GRIDS: Dict[str, List[float]] = {
     "box_threshold": [0.25, 0.30, 0.35, 0.40, 0.45],
     "text_threshold": [0.20, 0.25, 0.30],
@@ -879,7 +887,10 @@ def cmd_make_lists(args) -> int:
 # ---------------------------------------------------------------------------
 
 def _parse_grid(text: Optional[str], default: Sequence[float]) -> List[float]:
-    """Parse a comma-separated CLI grid, falling back to the report default."""
+    """Turn ``"0.2,0.3"`` into ``[0.2, 0.3]``, or use the default grid.
+
+    Empty pieces are ignored, so a trailing comma does not crash the run.
+    """
     if text is None:
         return list(default)
     values = [float(item.strip()) for item in str(text).split(",") if item.strip()]
@@ -889,7 +900,7 @@ def _parse_grid(text: Optional[str], default: Sequence[float]) -> List[float]:
 
 
 def _requested_grids(args) -> Dict[str, List[float]]:
-    """Return the five grids, honouring optional CLI overrides."""
+    """Collect the five candidate lists, using CLI overrides when supplied."""
     return {
         "box_threshold": _parse_grid(args.box_threshold_grid, DEFAULT_GRIDS["box_threshold"]),
         "text_threshold": _parse_grid(args.text_threshold_grid, DEFAULT_GRIDS["text_threshold"]),
@@ -904,12 +915,17 @@ def _requested_grids(args) -> Dict[str, List[float]]:
 def _metric_cache_path(
     cache_dir: Union[str, Path], eval_hash: str, image_id: int
 ) -> Path:
-    """Location of one small per-image E1 metric cache entry."""
+    """Where one image's E1 result for one setting is stored.
+
+    Every distinct setting gets its own folder (named by ``eval_hash``), and
+    every image gets one small ``.npz`` file inside it.  Saving these scores is
+    what lets a timed-out sweep resume instead of starting over.
+    """
     return Path(cache_dir) / "e1_tuning" / "sweep" / eval_hash / f"{int(image_id):012d}.npz"
 
 
 def _load_cached_e1_image(path: Path) -> Optional[E1ImageResult]:
-    """Load a cached per-image E1 result without re-running the model."""
+    """Load a cached per-image E1 result, or return ``None`` if unusable."""
     if not path.is_file():
         return None
     try:
@@ -928,7 +944,16 @@ def _load_cached_e1_image(path: Path) -> Optional[E1ImageResult]:
 
 
 def _save_cached_e1_image(path: Path, result: E1ImageResult) -> None:
-    """Persist the small counts/matrix needed to resume tuning."""
+    """Persist the small counts/matrix needed to resume tuning.
+
+    Only a few numbers are saved per image (the confusion matrix and some pixel
+    counts), not the image, the masks, or any model output.  That keeps the
+    cache tiny, so storing one file per image for every swept setting is cheap.
+
+    The data is written to a temporary file first and then renamed.  If the
+    session dies in the middle of a write, the real cache file is never left
+    half-written, so the next run either sees a complete file or no file.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp.npz")
     np.savez_compressed(
@@ -955,33 +980,90 @@ def _evaluate_setting(
     label_names: Sequence[str],
     gt_maps: Mapping[int, np.ndarray],
 ) -> Tuple[List[E1ImageResult], str]:
-    """Evaluate one parameter setting on the tuning IDs using metric caching."""
+    """Evaluate one parameter setting on the tuning IDs using metric caching.
+
+    This is the workhorse behind the sweep.  It is called once per candidate
+    setting (17 times with the default grids) and does the following:
+
+    1. Build an ``eval_hash`` that uniquely identifies this exact setting plus
+       everything else that changes the score (offset, class mapping, prompts,
+       routing rules, model IDs, paths).  The hash is the folder name for this
+       setting's per-image cache.
+    2. Copy the candidate values onto the live model config.
+    3. For each tuning image:
+       - if its cached score already exists, reuse it (no model call),
+       - otherwise run the decomposition, resize the ground-truth map to match,
+         score the pair, and save the small score file.
+    4. Return every image's score plus the hash, so the caller can reuse the
+       cache later.
+
+    The ground-truth maps are passed in already loaded; this function only
+    resizes them, which avoids re-reading the same PNG for every candidate.
+    """
+    # Identity of this setting: same hash means the same cache is valid.
     eval_hash = _eval_cache_hash(settings, args, offset, label_names)
+    # Put the candidate thresholds on the model before decomposing anything.
     _apply_params(decomposer.gsam, settings)
     results: List[E1ImageResult] = []
     for image_id in ids:
         cache_path = _metric_cache_path(args.cache_dir, eval_hash, image_id)
+        # Already scored this image for this exact setting? Reuse and move on.
         cached = _load_cached_e1_image(cache_path)
         if cached is not None:
             results.append(cached)
             continue
+        # Cache miss: run the model, then score against the ground truth.
         image_path, _ = _image_and_label(args, split, image_id)
         decomposition = decomposer.decompose(image_path)
+        # The prediction may have a different size than the stored mask, so
+        # resize the ground truth (nearest neighbour keeps class IDs intact).
         gt_map = resize_label_map(gt_maps[image_id], decomposition.shape)
         result = evaluate_e1_image(decomposition, gt_map, mapping)
+        # Save the small score file so an interrupted sweep can resume here.
         _save_cached_e1_image(cache_path, result)
         results.append(result)
     return results, eval_hash
 
 
 def cmd_tune(args) -> int:
-    """One-pass coordinate sweep on the tuning split, then save final caches."""
+    """Pick the five decomposition settings by scoring candidates on train images.
+
+    This is **not** training: no network weight changes.  The five values are
+    post-processing settings (detector cutoffs and merge rules), and "tuning"
+    here only means trying candidate values and keeping the one whose
+    decomposition scores best on the tuning images.
+
+    The search is a one-pass coordinate sweep:
+
+    1. Take the first setting, try each candidate value while the other four
+       keep their defaults, and keep the winner.
+    2. Move to the second setting, try candidates with the first winner fixed,
+       and keep the winner.
+    3. Continue in ``PARAMETER_ORDER`` until all five are chosen.
+
+    Each candidate is scored by E1 mIoU on the tuning images.  If two settings
+    score the same mIoU, the one that covers more pixels (pooled coverage) wins,
+    because equal quality over more of the image is the safer choice.
+
+    At the end the winning setting is re-scored, its full decompositions are
+    cached, and ``results/e1/selected_params.json`` is written so ``test`` can
+    reuse exactly this setting.
+
+    Because the sweep looks at one setting at a time, it is cheap (17 scores
+    with the default grids) but not guaranteed to find the globally best
+    combination.  Order matters, and a winner on the edge of a grid usually
+    means the useful range continues outside that grid.
+    """
+    # Class names from the official labels file: used to resolve the pixel
+    # offset and to map COCO-Stuff classes to scoring groups.
     label_names = load_label_names(args.label_names)
+    # The fixed tuning IDs (``--limit`` only shortens the in-memory copy for a
+    # smoke run; it never rewrites the list file).
     ids = _limit(_read_ids(args.tuning_ids), args)
     if not ids:
         raise SystemExit("tuning ID list is empty")
-    # Guard against an accidental tuning/test overlap: reading the test *list*
-    # is safe; no test image is opened by this command.
+    # Safety check: tuning must never touch images from the test split.
+    # Reading the test *list* is fine; no test image is opened by this command.
     test_list = Path(args.test_ids)
     if test_list.is_file():
         overlap = sorted(set(ids) & set(_read_ids(test_list)))
@@ -990,39 +1072,62 @@ def cmd_tune(args) -> int:
                 "tuning and test ID lists overlap; refusing to tune on test "
                 f"images: {overlap[:10]}"
             )
+    # Decide how to turn raw PNG values into class IDs.  ``auto`` inspects one
+    # map; the answer is saved in the cache and reused by later stages.
     first_map = _first_label_map(args, args.train_split, ids)
     offset, reason = _resolve_offset(args, label_names, first_map, args.cache_dir)
     print(f"[tune] offset={offset}: {reason}")
+    # Build the "which classes count, and in which group/domain" table.  Only
+    # listed classes are scored; everything else is ignored.
     mapping = load_class_mapping(
         args.class_groups, label_names, DecompConfig().prompts, offset, IGNORE_VALUE
     )
+    # Load every tuning ground-truth map once, up front.  The same maps are
+    # reused for all 17 candidate settings instead of being re-read each time.
     gt_maps = {
         image_id: load_label_map(_image_and_label(args, args.train_split, image_id)[1])
         for image_id in ids
     }
 
+    # One model instance for the whole sweep.  ``CachedDecomposer`` remembers
+    # DINO outputs and SAM masks, so changing only the cheap post-processing
+    # settings does not force the heavy models to run again.
     gsam = _build_gsam(args)
     decomposer = CachedDecomposer(gsam, Path(args.cache_dir))
+    # Candidate values for each setting (defaults unless the CLI overrode them).
     grids = _requested_grids(args)
+    # Start from the report defaults; each outer iteration improves one entry.
     best = _default_params()
     sweep_rows: List[Dict[str, object]] = []
 
+    # Outer loop: one setting at a time, in a fixed order.
     for parameter in PARAMETER_ORDER:
+        # Best value found so far for THIS setting.  Initialised to its current
+        # value, so a setting can stay at its default if nothing beats it.
         best_value = best[parameter]
         best_key: Optional[Tuple[float, float]] = None
+        # Inner loop: try every candidate value for this setting, with all
+        # previously selected settings held fixed.
         for value in grids[parameter]:
             candidate = dict(best)
             candidate[parameter] = float(value)
             print(f"[tune] {parameter}={value} on {len(ids)} tuning images")
+            # Score this candidate on all tuning images (reusing cached scores
+            # for images already done for this exact setting).
             results, _ = _evaluate_setting(
                 args, decomposer, candidate, ids, args.train_split,
                 mapping, offset, label_names, gt_maps,
             )
             summary = summarize_e1(results, mapping)
+            # Selection key: mIoU first, pooled coverage only as a tie-break.
+            # NaN means "undefined" (no valid groups); map it to -1 so it can
+            # never beat a real score.
             key = (
                 float(np.nan_to_num(summary["miou"], nan=-1.0)),
                 float(np.nan_to_num(summary["coverage_pooled"], nan=-1.0)),
             )
+            # Keep one row per candidate for tuning_sweep.csv, so the choice is
+            # auditable after the run.
             sweep_rows.append(
                 {
                     "parameter": parameter,
@@ -1036,12 +1141,17 @@ def cmd_tune(args) -> int:
                 f"[tune]   mIoU={summary['miou']:.4f} "
                 f"coverage={summary['coverage_pooled']:.4f}"
             )
+            # Strictly greater: on a tie the earlier (usually smaller) value
+            # stays, which keeps the sweep deterministic.
             if best_key is None or key > best_key:
                 best_key = key
                 best_value = float(value)
+        # Freeze this setting's winner; later settings are tried around it.
         best[parameter] = float(best_value)
         print(f"[tune] selected {parameter}={best[parameter]}")
 
+    # Write one row per candidate, in the order they were scored.  This is the
+    # evidence trail for the selected values.
     results_dir = Path(args.results_dir)
     _write_rows(
         results_dir / "e1" / "tuning_sweep.csv",
@@ -1049,13 +1159,19 @@ def cmd_tune(args) -> int:
         ["parameter", "value", "miou", "coverage", "n_images"],
     )
 
-    # Save full decompositions only for the finally selected setting.
+    # Full decompositions are only saved for the FINAL winning setting, because
+    # those files are much bigger than the tiny score caches above.  ``test``
+    # needs them later, so they are written with a manifest hash that records
+    # which setting produced them.
     selected_hash = _eval_cache_hash(best, args, offset, label_names)
     (Path(args.cache_dir) / "e1_tuning").mkdir(parents=True, exist_ok=True)
     manifest_path = Path(args.cache_dir) / "e1_tuning" / "manifest.json"
+    # Put the winning values on the model before saving decompositions.
     _apply_params(gsam, best)
     for image_id in ids:
         cache_path = Path(args.cache_dir) / "e1_tuning" / f"{int(image_id):012d}.npz"
+        # Skip only if this image was already saved for this exact setting;
+        # a different hash means the old file is stale and must be replaced.
         if cache_path.is_file() and _manifest_matches(manifest_path, image_id, selected_hash):
             continue
         image_path, _ = _image_and_label(args, args.train_split, image_id)
@@ -1063,13 +1179,16 @@ def cmd_tune(args) -> int:
         save_decomposition(decomposition, str(cache_path))
         _update_manifest(manifest_path, image_id, selected_hash)
 
-    # Re-evaluate the selected setting from the metric cache for the recorded
-    # summary (no extra model calls when the cache is warm).
+    # Re-score the winning setting through the metric cache to record its final
+    # summary.  Most images are already cached from the sweep, so this is cheap
+    # and usually needs no extra model calls.
     selected_results, _ = _evaluate_setting(
         args, decomposer, best, ids, args.train_split,
         mapping, offset, label_names, gt_maps,
     )
     selected_summary = summarize_e1(selected_results, mapping)
+    # This file is the hand-off to ``test``: it holds the chosen values plus
+    # enough context to detect a stale or inconsistent run later.
     selected_payload = {
         "params": best,
         "grids": grids,
