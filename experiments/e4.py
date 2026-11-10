@@ -1179,6 +1179,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # figures
     p_fig = subparsers.add_parser("figures", help="Generate summary tables, ablation charts, and report.")
+    p_fig.add_argument("--results-dir", default=None, help="Directory where E4 results and figures are saved.")
     p_fig.set_defaults(func=cmd_figures)
 
     # all
