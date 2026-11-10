@@ -104,10 +104,13 @@ def build_e3_image_manifest(
             image_id = int(image_id)
             path = get_coco_image_path(image_id, coco_root, split=split)
             if not Path(path).is_file():
-                missing[set_name].append(image_id)
-                if not allow_missing:
+                # Also check train2017 split if available under coco_root
+                train_cand = Path(coco_root) / "train2017" / f"{image_id:012d}.jpg"
+                if train_cand.is_file():
+                    path = str(train_cand)
+                else:
+                    missing[set_name].append(image_id)
                     continue
-                continue
             image_sets[image_id].append(set_name)
             if image_id not in seen:
                 paths.append((image_id, path))
@@ -212,7 +215,7 @@ def run_e3_experiment(
     variants: Optional[Iterable[str]] = None,
     device: str = "cuda",
     gt_root: Optional[Union[str, Path]] = None,
-    allow_missing: bool = False,
+    allow_missing: bool = True,
     overwrite: bool = False,
 ) -> List[ResultsRecord]:
     """Run DDColor-T and DDColor-L on the complete E3 image set.
