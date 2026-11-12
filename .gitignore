@@ -13,3 +13,4 @@ notebooks/.ipynb_checkpoints/
 *.zip
 *.pth
 
+results/
