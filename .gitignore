@@ -14,3 +14,4 @@ notebooks/.ipynb_checkpoints/
 *.pth
 
 results/
+text_for_claude.txt
