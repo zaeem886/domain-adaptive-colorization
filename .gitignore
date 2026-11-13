@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.venv/
 
 # E1/E2 model caches and bulky generated outputs.
 # Small CSV/JSON result files may be committed; raw check-data images are not.

@@ -13,3 +13,9 @@ torch>=2.0.0
 
 # Optional: required only when running live DDColor checkpoints via ExpertManager
 # ddcolor
+
+# Test suite dependencies (pytest, E1/E2 figures and tabular result helpers).
+# Models are stubbed in tests, so torch / segment-anything / transformers are not needed.
+pytest>=8.0.0
+matplotlib>=3.7.0
+pandas>=2.0.0
