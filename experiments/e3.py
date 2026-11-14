@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import sys
 from collections import defaultdict
@@ -54,6 +55,27 @@ E3_CONDITIONS: Mapping[str, Tuple[str, int]] = {
     "ddcolor_t_whole": ("checkpoint_t", 256),
     "ddcolor_l_whole": ("checkpoint_l", 512),
 }
+
+
+def get_e3_set_ids() -> Dict[str, Sequence[int]]:
+    """Return the active E3 set IDs, preferring outputs/e3_ids.json if present."""
+    ids_file = Path("outputs/e3_ids.json")
+    if ids_file.is_file():
+        try:
+            with ids_file.open("r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+            if all(k in saved for k in E3_SET_NAMES):
+                return {k: tuple(saved[k]) for k in E3_SET_NAMES}
+        except Exception:
+            pass
+    from colorize.test_sets import DOMAIN_SET_IDS, MIXED_SCENE_IDS
+    return {
+        "domain_people": tuple(DOMAIN_SET_IDS["people"]),
+        "domain_nature": tuple(DOMAIN_SET_IDS["nature"]),
+        "domain_urban": tuple(DOMAIN_SET_IDS["urban"]),
+        "domain_animals": tuple(DOMAIN_SET_IDS["animals"]),
+        "mixed_scene": tuple(MIXED_SCENE_IDS),
+    }
 
 
 def build_e3_image_manifest(
@@ -98,9 +120,10 @@ def build_e3_image_manifest(
     image_sets: Dict[int, List[str]] = defaultdict(list)
     missing: Dict[str, List[int]] = {name: [] for name in selected}
     seen: set[int] = set()
+    set_id_map = get_e3_set_ids()
 
     for set_name in selected:
-        for image_id in E3_SET_IDS[set_name]:
+        for image_id in set_id_map.get(set_name, ()):
             image_id = int(image_id)
             path = get_coco_image_path(image_id, coco_root, split=split)
             if not Path(path).is_file():

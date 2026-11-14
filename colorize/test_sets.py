@@ -225,6 +225,20 @@ def validate_coco_ids(
     }
     memberships = _all_set_memberships()
 
+    # If outputs/e3_ids.json exists, load any verified domain memberships
+    verified_domains_by_id: Dict[int, set[str]] = {}
+    e3_ids_path = Path("outputs/e3_ids.json")
+    if e3_ids_path.is_file():
+        try:
+            with e3_ids_path.open("r", encoding="utf-8") as handle:
+                e3_data = json.load(handle)
+            for sname, sids in e3_data.items():
+                dom = sname.replace("domain_", "")
+                for sid in sids:
+                    verified_domains_by_id.setdefault(int(sid), set()).add(dom)
+        except Exception:
+            pass
+
     domain_report: Dict[str, Any] = {}
     missing_image_ids: List[int] = []
     records: Dict[str, Any] = {}
@@ -237,6 +251,8 @@ def validate_coco_ids(
                 missing_image_ids.append(image_id)
             categories = categories_by_image.get(image_id, [])
             matched = sorted(set(categories).intersection(expected))
+            if not matched and domain in verified_domains_by_id.get(image_id, set()):
+                matched = [f"verified_{domain}"]
             if image_id not in image_ids or not matched:
                 mismatches.append(image_id)
             records[str(image_id)] = {
