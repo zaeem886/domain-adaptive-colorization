@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -108,3 +110,39 @@ def test_annotation_file_errors_are_clear(tmp_path):
     malformed.write_text("not json", encoding="utf-8")
     with pytest.raises(ValueError, match="Invalid COCO annotation JSON"):
         test_sets.validate_coco_ids(malformed)
+
+
+# ---------------------------------------------------------------------------
+# Real-data guard: only runs when COCO_ANN env-var points at the real file.
+# This check is what prevents bad ID lists from being committed again.
+# On Kaggle: COCO_ANN=/kaggle/input/.../annotations/instances_val2017.json
+# Locally:   COCO_ANN=/data/coco/annotations/instances_val2017.json
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(
+    not os.environ.get("COCO_ANN"),
+    reason=(
+        "Set COCO_ANN=/path/to/instances_val2017.json to enable real-data checks. "
+        "This guard prevents IDs that do not exist in val2017 from being committed."
+    ),
+)
+def test_all_e3_ids_exist_in_val2017_and_no_duplicates():
+    """Every fixed E3 ID must exist as a val2017 JPEG; no ID may appear in two sets."""
+    ann_path = Path(os.environ["COCO_ANN"])
+    coco_root = ann_path.parent.parent  # …/annotations/ → parent → coco root
+    val2017 = coco_root / "val2017"
+
+    all_e3_ids = [
+        img_id
+        for ids in test_sets.DOMAIN_SET_IDS.values()
+        for img_id in ids
+    ] + list(test_sets.MIXED_SCENE_IDS)
+
+    missing = [
+        img_id for img_id in all_e3_ids
+        if not (val2017 / f"{img_id:012d}.jpg").exists()
+    ]
+    assert missing == [], (
+        f"{len(missing)} E3 IDs are not in val2017: {missing[:10]}{'...' if len(missing) > 10 else ''}"
+    )
+    assert test_sets.find_duplicate_ids() == {}, "Duplicate IDs found across test sets"

@@ -16,3 +16,4 @@ notebooks/.ipynb_checkpoints/
 
 results/
 text_for_claude.txt
+*prompt/

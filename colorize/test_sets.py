@@ -22,6 +22,14 @@ from typing import Any, Dict, Iterable, List, Mapping, Tuple, Union
 # ---------------------------------------------------------------------------
 # Fixed COCO val2017 image ID lists
 # ---------------------------------------------------------------------------
+# !! REGENERATION REQUIRED !!
+# The IDs below were written without checking real COCO val2017 files.
+# Run the "Cell 9a-new" Kaggle cell (see kaggle_pipeline.ipynb comments) to
+# generate outputs/e3_ids.json from actual val2017 images, then paste the
+# results here and re-run Cell 9b.  After replacement the guard test
+#   COCO_ANN=.../instances_val2017.json pytest tests/test_test_sets.py
+# must pass with 0 missing and 0 duplicate IDs before committing.
+# ---------------------------------------------------------------------------
 
 #: Mapping from domain name to 20 fixed COCO val2017 image IDs.
 DOMAIN_SET_IDS: Dict[str, List[int]] = {

@@ -104,13 +104,8 @@ def build_e3_image_manifest(
             image_id = int(image_id)
             path = get_coco_image_path(image_id, coco_root, split=split)
             if not Path(path).is_file():
-                # Also check train2017 split if available under coco_root
-                train_cand = Path(coco_root) / "train2017" / f"{image_id:012d}.jpg"
-                if train_cand.is_file():
-                    path = str(train_cand)
-                else:
-                    missing[set_name].append(image_id)
-                    continue
+                missing[set_name].append(image_id)
+                continue
             image_sets[image_id].append(set_name)
             if image_id not in seen:
                 paths.append((image_id, path))
