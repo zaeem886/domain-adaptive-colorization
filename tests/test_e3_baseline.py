@@ -75,7 +75,11 @@ def test_run_e3_baseline_writes_colorfulness_and_gt_metrics(tmp_path, monkeypatc
         return predicted
 
     monkeypatch.setattr(e3, "colorize_whole_image", fake_colorize)
+    import colorize.metrics as metrics
+    monkeypatch.setattr(metrics, "compute_lpips", lambda *args, **kwargs: 0.2)
+    monkeypatch.setattr(metrics, "compute_inception_features", lambda image, **kwargs: np.array([1.0, 2.0]))
     output_csv = tmp_path / "results" / "e3.csv"
+    fid_features = {}
 
     records = e3.run_e3_baseline(
         image_paths=[("demo", image_path)],
@@ -84,16 +88,19 @@ def test_run_e3_baseline_writes_colorfulness_and_gt_metrics(tmp_path, monkeypatc
         output_csv=output_csv,
         condition="ddcolor_t_whole",
         device="cpu",
+        fid_feature_records=fid_features,
     )
 
     assert output_csv.exists()
     assert {record.metric for record in records} == {
-        "colorfulness", "psnr", "ssim", "lab_delta_e", "boundary_delta_e"
+        "colorfulness", "psnr", "ssim", "lab_delta_e", "boundary_delta_e", "lpips"
     }
     loaded = load_results(output_csv)
     assert len(loaded) == len(records)
     assert all(record.experiment == "E3" for record in loaded)
     assert all(record.condition == "ddcolor_t_whole" for record in loaded)
+    assert set(fid_features) == {"demo"}
+    assert fid_features["demo"][0].shape == (2,)
 
 
 def test_run_e3_baseline_skips_unreadable_images(tmp_path):

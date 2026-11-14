@@ -44,6 +44,9 @@ try:
 except ImportError:
     _HAS_SCIPY = False
 
+_LPIPS_MODELS = {}
+_INCEPTION_MODELS = {}
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -341,7 +344,11 @@ def compute_lpips(
         )
         return float("nan")
 
-    loss_fn = _lpips.LPIPS(net="alex", verbose=False).to(device)
+    cache_key = str(device)
+    loss_fn = _LPIPS_MODELS.get(cache_key)
+    if loss_fn is None:
+        loss_fn = _lpips.LPIPS(net="alex", verbose=False).to(device).eval()
+        _LPIPS_MODELS[cache_key] = loss_fn
 
     def _to_tensor(img: np.ndarray) -> "torch.Tensor":  # type: ignore[name-defined]
         t = torch.from_numpy(img.transpose(2, 0, 1)).float() / 127.5 - 1.0  # [-1,1]
@@ -351,6 +358,42 @@ def compute_lpips(
         dist = loss_fn(_to_tensor(img_true), _to_tensor(img_pred))
 
     return float(dist.item())
+
+
+def compute_inception_features(img_rgb: np.ndarray, device: str = "cpu") -> np.ndarray:
+    """Extract 2048-D Inception-v3 pool features for one uint8 RGB image.
+
+    Uses the ImageNet-pretrained torchvision Inception-v3 classifier with its
+    final classification layer replaced by an identity. Images are resized to
+    299x299 and normalized to [-1, 1]. The pretrained weights are downloaded
+    by torchvision on first use if they are not cached locally.
+    """
+    _check_uint8_rgb(img_rgb)
+    try:
+        import torch
+        import torch.nn.functional as torch_f
+        from torchvision.models import Inception_V3_Weights, inception_v3
+    except ImportError as exc:
+        raise ImportError(
+            "torch and torchvision are required for E3 FID feature extraction"
+        ) from exc
+
+    cache_key = str(device)
+    model = _INCEPTION_MODELS.get(cache_key)
+    if model is None:
+        model = inception_v3(weights=Inception_V3_Weights.DEFAULT, aux_logits=True)
+        model.fc = torch.nn.Identity()
+        model.to(device).eval()
+        _INCEPTION_MODELS[cache_key] = model
+
+    tensor = torch.from_numpy(img_rgb.transpose(2, 0, 1).copy()).float().unsqueeze(0)
+    tensor = tensor.to(device) / 127.5 - 1.0
+    tensor = torch_f.interpolate(tensor, size=(299, 299), mode="bilinear", align_corners=False)
+    with torch.no_grad():
+        features = model(tensor)
+    if hasattr(features, "logits"):
+        features = features.logits
+    return features.reshape(features.shape[0], -1)[0].detach().cpu().numpy().astype(np.float64)
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +445,27 @@ def compute_fid(
             f"Feature dimension mismatch: real={real_feats.shape[1]}, "
             f"fake={fake_feats.shape[1]}"
         )
+
+    # For the common small-set/high-dimensional case (e.g. 20 COCO images and
+    # 2048 Inception features), evaluate the covariance cross-term in sample
+    # space. This is algebraically equivalent and avoids a 2048x2048 matrix
+    # square root for every domain/model pair.
+    if real_feats.shape[0] < 2 or fake_feats.shape[0] < 2:
+        raise ValueError("FID requires at least two real and two generated feature rows")
+    if real_feats.shape[1] > min(real_feats.shape[0], fake_feats.shape[0]):
+        mu_r = np.mean(real_feats, axis=0)
+        mu_f = np.mean(fake_feats, axis=0)
+        centered_r = real_feats - mu_r
+        centered_f = fake_feats - mu_f
+        cov_trace = (
+            float(np.sum(centered_r ** 2) / (real_feats.shape[0] - 1))
+            + float(np.sum(centered_f ** 2) / (fake_feats.shape[0] - 1))
+        )
+        cross = centered_r @ centered_f.T
+        cross /= math.sqrt((real_feats.shape[0] - 1) * (fake_feats.shape[0] - 1))
+        cross_trace = float(np.sum(np.linalg.svd(cross, compute_uv=False)))
+        mean_term = float((mu_r - mu_f) @ (mu_r - mu_f))
+        return max(0.0, mean_term + cov_trace - 2.0 * cross_trace)
 
     mu_r = np.mean(real_feats, axis=0)
     mu_f = np.mean(fake_feats, axis=0)

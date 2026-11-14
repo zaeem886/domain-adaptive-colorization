@@ -14,6 +14,10 @@ torch>=2.0.0
 # Optional: required only when running live DDColor checkpoints via ExpertManager
 # ddcolor
 
+# E3 perceptual metrics (LPIPS per image and Inception features for set-level FID)
+lpips>=0.1.4
+torchvision>=0.15.0
+
 # Test suite dependencies (pytest, E1/E2 figures and tabular result helpers).
 # Models are stubbed in tests, so torch / segment-anything / transformers are not needed.
 pytest>=8.0.0

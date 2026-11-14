@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import csv
 
+import numpy as np
+
 from colorize.results import ResultsRecord, append_result
 from experiments import e3
 
@@ -44,7 +46,7 @@ def test_build_e3_image_manifest_fails_before_partial_run(tmp_path):
 def test_run_e3_experiment_runs_both_variants_and_writes_summary(tmp_path, monkeypatch):
     coco_root = _make_coco_files(tmp_path)
 
-    def fake_runner(*, image_paths, output_csv, condition, **kwargs):
+    def fake_runner(*, image_paths, output_csv, condition, fid_feature_records, **kwargs):
         assert len(image_paths) == 20
         assert kwargs["input_size"] in (256, 512)
         records = []
@@ -52,12 +54,18 @@ def test_run_e3_experiment_runs_both_variants_and_writes_summary(tmp_path, monke
             record = ResultsRecord("E3", condition, str(image_id), "psnr", 30.0)
             append_result(output_csv, record)
             records.append(record)
+            value = float(int(image_id) % 17)
+            fid_feature_records[str(image_id)] = (
+                np.array([value, value * 0.5]),
+                np.array([value + 1.0, value * 0.25]),
+            )
         return records
 
     monkeypatch.setattr(e3, "run_e3_baseline", fake_runner)
     output_csv = tmp_path / "outputs" / "e3_results.csv"
     summary_csv = tmp_path / "outputs" / "e3_summary.csv"
     manifest_csv = tmp_path / "outputs" / "e3_manifest.csv"
+    fid_csv = tmp_path / "outputs" / "e3_fid.csv"
 
     records = e3.run_e3_experiment(
         coco_root=coco_root,
@@ -67,6 +75,7 @@ def test_run_e3_experiment_runs_both_variants_and_writes_summary(tmp_path, monke
         output_csv=output_csv,
         summary_csv=summary_csv,
         manifest_csv=manifest_csv,
+        fid_csv=fid_csv,
         set_names=["mixed_scene"],
         gt_root=coco_root,
         device="cpu",
@@ -80,6 +89,7 @@ def test_run_e3_experiment_runs_both_variants_and_writes_summary(tmp_path, monke
     assert output_csv.exists()
     assert summary_csv.exists()
     assert manifest_csv.exists()
+    assert fid_csv.exists()
 
     with summary_csv.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
@@ -88,3 +98,8 @@ def test_run_e3_experiment_runs_both_variants_and_writes_summary(tmp_path, monke
         ("ddcolor_l_whole", "mixed_scene", "psnr"),
     }
     assert all(row["count"] == "20" for row in rows)
+    with fid_csv.open(newline="", encoding="utf-8") as handle:
+        fid_rows = list(csv.DictReader(handle))
+    assert len(fid_rows) == 2
+    assert {row["metric"] for row in fid_rows} == {"fid"}
+    assert all(row["count"] == "20" for row in fid_rows)

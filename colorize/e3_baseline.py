@@ -270,6 +270,7 @@ def run_e3_baseline(
     input_size: int = 256,
     experiment: str = "E3",
     gt_root: Optional[Union[str, Path]] = None,
+    fid_feature_records: Optional[dict] = None,
 ) -> List:
     """Run the E3 whole-image DDColor baseline and record metrics to CSV.
 
@@ -278,8 +279,9 @@ def run_e3_baseline(
     1. Loads the grayscale L channel (and original RGB if ``gt_root`` is set).
     2. Runs DDColor on the **whole image** (no decomposition / routing).
     3. Computes colourfulness on the colourised output.
-    4. If ``gt_root`` is provided, computes PSNR, SSIM, Lab ΔE, and boundary
-       ΔE against the ground-truth image.
+    4. If ``gt_root`` is provided, computes PSNR, SSIM, Lab ΔE, boundary ΔE,
+       and LPIPS against the ground-truth image, and collects Inception
+       features for the set-level FID calculation.
     5. Appends :class:`colorize.results.ResultsRecord` entries to *output_csv*.
 
     Parameters
@@ -319,6 +321,8 @@ def run_e3_baseline(
         compute_ssim,
         compute_lab_delta_e,
         compute_boundary_delta_e,
+        compute_lpips,
+        compute_inception_features,
     )
 
     output_csv = Path(output_csv)
@@ -378,10 +382,16 @@ def run_e3_baseline(
                 "ssim": compute_ssim,
                 "lab_delta_e": compute_lab_delta_e,
                 "boundary_delta_e": compute_boundary_delta_e,
+                "lpips": lambda a, b: compute_lpips(a, b, device=device),
             }
             for metric_name, fn in metric_fns.items():
                 try:
                     value = fn(gt_rgb, rgb_pred_resized)
+                    if not np.isfinite(value):
+                        raise RuntimeError(
+                            f"Metric '{metric_name}' returned a non-finite value; "
+                            "check its optional dependencies"
+                        )
                     rec = ResultsRecord(
                         experiment=experiment,
                         condition=condition,
@@ -392,7 +402,16 @@ def run_e3_baseline(
                     append_result(output_csv, rec)
                     all_records.append(rec)
                 except Exception as exc:
+                    if metric_name == "lpips":
+                        raise RuntimeError(
+                            "E3 LPIPS evaluation failed; verify that torch and lpips are installed"
+                        ) from exc
                     logger.warning("Metric '%s' failed for %s: %s", metric_name, image_path, exc)
+
+            if fid_feature_records is not None:
+                real_features = compute_inception_features(gt_rgb, device=device)
+                fake_features = compute_inception_features(rgb_pred_resized, device=device)
+                fid_feature_records[image_id_str] = (real_features, fake_features)
 
     print(f"[E3] Done. {len(all_records)} records written to {output_csv}")
     return all_records

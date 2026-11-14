@@ -33,11 +33,14 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
+import numpy as np
+
 # Allow ``python experiments/e3.py`` from the repository root.
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from colorize.e3_baseline import run_e3_baseline
+from colorize.metrics import compute_fid
 from colorize.results import ResultsRecord, load_results
 from colorize.test_sets import DOMAIN_SET_IDS, MIXED_SCENE_IDS, get_coco_image_path
 
@@ -220,6 +223,43 @@ def write_e3_summary(
                     )
 
 
+def write_e3_fid_summary(
+    output_csv: Union[str, Path],
+    features_by_condition: Mapping[str, Mapping[str, Tuple[np.ndarray, np.ndarray]]],
+    image_sets: Mapping[int, Sequence[str]],
+) -> None:
+    """Write one Inception-feature FID value per model and fixed image set."""
+    output_path = Path(output_csv)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(("experiment", "condition", "set", "metric", "count", "value"))
+        available_sets = {
+            set_name
+            for memberships in image_sets.values()
+            for set_name in memberships
+        }
+        for condition, feature_map in features_by_condition.items():
+            for set_name in E3_SET_NAMES:
+                if set_name not in available_sets:
+                    continue
+                ids = [
+                    str(image_id) for image_id, memberships in image_sets.items()
+                    if set_name in memberships and str(image_id) in feature_map
+                ]
+                if len(ids) < 2:
+                    raise RuntimeError(
+                        f"FID needs at least two completed images for {condition}/{set_name}; "
+                        f"found {len(ids)}"
+                    )
+                real = np.stack([feature_map[image_id][0] for image_id in ids])
+                fake = np.stack([feature_map[image_id][1] for image_id in ids])
+                value = compute_fid(real, fake)
+                if not np.isfinite(value):
+                    raise RuntimeError(f"FID is non-finite for {condition}/{set_name}")
+                writer.writerow(("E3", condition, set_name, "fid", len(ids), f"{value:.10g}"))
+
+
 def run_e3_experiment(
     coco_root: Union[str, Path],
     ddcolor_path: Union[str, Path],
@@ -227,6 +267,7 @@ def run_e3_experiment(
     checkpoint_l: Union[str, Path],
     output_csv: Union[str, Path] = "outputs/e3_results.csv",
     summary_csv: Union[str, Path] = "outputs/e3_summary.csv",
+    fid_csv: Union[str, Path] = "outputs/e3_fid.csv",
     manifest_csv: Union[str, Path] = "outputs/e3_manifest.csv",
     split: str = "val2017",
     set_names: Optional[Iterable[str]] = None,
@@ -268,6 +309,7 @@ def run_e3_experiment(
         "checkpoint_t": str(checkpoint_t),
         "checkpoint_l": str(checkpoint_l),
     }
+    features_by_condition: Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]] = {}
     for variant in selected_variants:
         checkpoint_key, input_size = E3_CONDITIONS[variant]
         logger.info(
@@ -276,6 +318,7 @@ def run_e3_experiment(
             len(image_paths),
             input_size,
         )
+        condition_features: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
         run_e3_baseline(
             image_paths=image_paths,
             checkpoint=checkpoints[checkpoint_key],
@@ -286,10 +329,13 @@ def run_e3_experiment(
             input_size=input_size,
             experiment="E3",
             gt_root=gt_root if gt_root is not None else coco_root,
+            fid_feature_records=condition_features,
         )
+        features_by_condition[variant] = condition_features
 
     records = load_results(output_path)
     write_e3_summary(summary_csv, records, image_sets)
+    write_e3_fid_summary(fid_csv, features_by_condition, image_sets)
     return records
 
 
@@ -306,6 +352,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--device", default="cuda")
     run.add_argument("--output-csv", default="outputs/e3_results.csv")
     run.add_argument("--summary-csv", default="outputs/e3_summary.csv")
+    run.add_argument("--fid-csv", default="outputs/e3_fid.csv")
     run.add_argument("--manifest-csv", default="outputs/e3_manifest.csv")
     run.add_argument(
         "--sets",
@@ -345,6 +392,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             checkpoint_l=args.checkpoint_l,
             output_csv=args.output_csv,
             summary_csv=args.summary_csv,
+            fid_csv=args.fid_csv,
             manifest_csv=args.manifest_csv,
             split=args.split,
             set_names=args.sets,
@@ -355,6 +403,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         print(f"E3 complete: {len(records)} metric records written to {args.output_csv}")
         print(f"E3 summary written to {args.summary_csv}")
+        print(f"E3 FID summary written to {args.fid_csv}")
         return 0
     return 2
 
