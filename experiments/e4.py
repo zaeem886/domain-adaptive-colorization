@@ -709,10 +709,14 @@ def cmd_make_lists(args) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     list_path = out_dir / "e4_test_ids.txt"
 
-    ids = load_active_e4_ids(
-        getattr(args, "id_list", None),
-        getattr(args, "ids_json", None),
-    )
+    try:
+        ids = load_active_e4_ids(
+            getattr(args, "id_list", None),
+            getattr(args, "ids_json", None),
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"[make-lists] ERROR: {exc}")
+        return 1
     if getattr(args, "limit", None) is not None and args.limit > 0:
         ids = ids[: args.limit]
 
