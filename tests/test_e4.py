@@ -5,6 +5,7 @@ Run with:  pytest tests/test_e4.py -v
 from __future__ import annotations
 
 import math
+import json
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -26,6 +27,9 @@ from experiments.e4 import (
     build_parser,
     evaluate_colorization_metrics,
     get_e4_conditions,
+    load_active_e4_ids,
+    load_ids_json,
+    preflight_image_files,
     run_pipeline_for_image_ablations,
 )
 
@@ -273,3 +277,72 @@ def test_cli_parser_subcommands():
     args_fig = parser.parse_args(["figures", "--results-dir", "results/test_e4"])
     assert args_fig.command == "figures"
     assert args_fig.results_dir == "results/test_e4"
+
+
+# ---------------------------------------------------------------------------
+# Test: Image-ID resolution and disk preflight
+# ---------------------------------------------------------------------------
+
+def _write_ids_json(path: Path, per_set: int = 20, start: int = 1) -> dict:
+    payload = {}
+    image_id = start
+    for key in (
+        "domain_people",
+        "domain_nature",
+        "domain_urban",
+        "domain_animals",
+        "mixed_scene",
+    ):
+        payload[key] = list(range(image_id, image_id + per_set))
+        image_id += per_set
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return payload
+
+
+def test_load_ids_json_and_validation(tmp_path):
+    path = tmp_path / "e3_ids.json"
+    payload = _write_ids_json(path)
+
+    ids = load_ids_json(path)
+    assert len(ids) == 100
+    assert len(set(ids)) == 100
+
+    empty = tmp_path / "empty.json"
+    empty.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="missing set keys"):
+        load_ids_json(empty)
+
+    duplicate = tmp_path / "duplicate.json"
+    dup_payload = dict(payload)
+    dup_payload["mixed_scene"] = [dup_payload["mixed_scene"][0]] * 20
+    duplicate.write_text(json.dumps(dup_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate"):
+        load_ids_json(duplicate)
+
+    with pytest.raises(FileNotFoundError):
+        load_ids_json(tmp_path / "absent.json")
+
+
+def test_load_active_e4_ids_priority(tmp_path):
+    json_path = tmp_path / "e3_ids.json"
+    _write_ids_json(json_path, start=1)
+
+    list_path = tmp_path / "ids.txt"
+    list_path.write_text("000000000900\n000000000901\n", encoding="utf-8")
+
+    assert load_active_e4_ids(id_list=list_path, ids_json=json_path) == [900, 901]
+    assert len(load_active_e4_ids(ids_json=json_path)) == 100
+
+    # An explicit but missing list must not silently fall back.
+    with pytest.raises(FileNotFoundError, match="image-ID list not found"):
+        load_active_e4_ids(id_list=tmp_path / "absent.txt", ids_json=json_path)
+
+
+def test_preflight_image_files(tmp_path):
+    ids = [11, 22, 33]
+    for image_id in ids[:2]:
+        (tmp_path / f"{image_id:012d}.jpg").write_bytes(b"x")
+
+    missing = preflight_image_files(ids, tmp_path, "val2017")
+    assert missing == [33]
+    assert preflight_image_files(ids[:2], tmp_path, "val2017") == []

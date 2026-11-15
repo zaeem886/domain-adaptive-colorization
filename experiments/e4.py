@@ -90,13 +90,112 @@ DEFAULT_SMOOTHING_WIDTHS: Tuple[float, ...] = (2.0, 5.0, 10.0, 15.0, 20.0)
 # Margins swept in the context margin ablation
 DEFAULT_MARGINS: Tuple[float, ...] = (0.0, 0.1, 0.2, 0.3)
 
-# Default test set IDs: 20 per domain (80) + 20 mixed scene = 100 images
+# Default test set IDs: 20 per domain (80) + 20 mixed scene = 100 images.
+# These are only a last-resort fallback; the canonical E4 list is generated
+# from the mounted val2017 files by scripts/generate_test_ids.py and stored in
+# DEFAULT_E4_IDS_JSON.
 DEFAULT_E4_IDS: List[int] = sorted(
     set(
         [img_id for ids in DOMAIN_SET_IDS.values() for img_id in ids]
         + MIXED_SCENE_IDS
     )
 )
+
+# Canonical ID file written by scripts/generate_test_ids.py.
+DEFAULT_E4_IDS_JSON = Path("outputs/e3_ids.json")
+
+# Keys expected in the generated ID JSON.
+E4_ID_SET_KEYS: Tuple[str, ...] = (
+    "domain_people",
+    "domain_nature",
+    "domain_urban",
+    "domain_animals",
+    "mixed_scene",
+)
+
+
+def load_ids_json(path: Union[str, Path]) -> List[int]:
+    """Load and validate a generated ID JSON file (``outputs/e3_ids.json``)."""
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"image-ID JSON not found: {path}")
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a JSON object of set names to ID lists")
+
+    missing_keys = [key for key in E4_ID_SET_KEYS if key not in data]
+    if missing_keys:
+        raise ValueError(f"{path}: missing set keys {missing_keys}")
+
+    ids: List[int] = []
+    for key in E4_ID_SET_KEYS:
+        values = data[key]
+        if not isinstance(values, list) or not values:
+            raise ValueError(f"{path}: {key} must be a non-empty list of IDs")
+        for value in values:
+            try:
+                ids.append(int(value))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{path}: {key} contains a non-integer ID: {value!r}") from exc
+
+    if len(ids) != len(set(ids)):
+        raise ValueError(f"{path}: the sets contain duplicate image IDs")
+    return ids
+
+
+def load_active_e4_ids(
+    id_list: Optional[Union[str, Path]] = None,
+    ids_json: Optional[Union[str, Path]] = None,
+) -> List[int]:
+    """Resolve the image IDs E4 should evaluate.
+
+    Priority: an explicit ``--id-list`` text file, then the generated
+    ``outputs/e3_ids.json``, then the checked-in defaults.  A missing explicit
+    file is an error rather than a silent fallback to the placeholder lists.
+    """
+    if id_list is not None:
+        path = Path(id_list)
+        if not path.is_file():
+            raise FileNotFoundError(f"image-ID list not found: {path}")
+        ids: List[int] = []
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    ids.append(int(line))
+        if not ids:
+            raise ValueError(f"image-ID list is empty: {path}")
+        if len(ids) != len(set(ids)):
+            raise ValueError(f"image-ID list contains duplicates: {path}")
+        return ids
+
+    json_path = Path(ids_json) if ids_json is not None else DEFAULT_E4_IDS_JSON
+    if json_path.is_file():
+        return load_ids_json(json_path)
+    if ids_json is not None:
+        raise FileNotFoundError(f"image-ID JSON not found: {json_path}")
+
+    logger.warning(
+        "No --id-list and no %s; falling back to the checked-in placeholder IDs. "
+        "Run scripts/generate_test_ids.py to create canonical IDs.",
+        json_path,
+    )
+    return list(DEFAULT_E4_IDS)
+
+
+def preflight_image_files(
+    image_ids: Sequence[int],
+    images_root: Union[str, Path],
+    split: Optional[str] = None,
+) -> List[int]:
+    """Return the image IDs whose JPEG cannot be found under *images_root*."""
+    missing: List[int] = []
+    for image_id in image_ids:
+        if find_image_path(images_root, split, image_id) is None:
+            missing.append(int(image_id))
+    return missing
 
 
 # ---------------------------------------------------------------------------
@@ -610,7 +709,10 @@ def cmd_make_lists(args) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     list_path = out_dir / "e4_test_ids.txt"
 
-    ids = list(DEFAULT_E4_IDS)
+    ids = load_active_e4_ids(
+        getattr(args, "id_list", None),
+        getattr(args, "ids_json", None),
+    )
     if getattr(args, "limit", None) is not None and args.limit > 0:
         ids = ids[: args.limit]
 
@@ -653,18 +755,25 @@ def cmd_run(args) -> int:
     print(f"[run] Active conditions ({len(active_conds)}): {list(active_conds.keys())}")
 
     # Resolve image list
-    image_ids: List[int] = []
-    if args.id_list and Path(args.id_list).is_file():
-        with open(args.id_list, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    image_ids.append(int(line))
-    else:
-        image_ids = list(DEFAULT_E4_IDS)
+    try:
+        image_ids = load_active_e4_ids(args.id_list, getattr(args, "ids_json", None))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"[run] ERROR: {exc}")
+        return 1
 
     if args.limit is not None and args.limit > 0:
         image_ids = image_ids[: args.limit]
+
+    missing = preflight_image_files(image_ids, args.images_root, args.val_split)
+    if missing:
+        preview = ", ".join(f"{image_id:012d}" for image_id in missing[:10])
+        print(
+            f"[run] ERROR: {len(missing)} of {len(image_ids)} image IDs are not "
+            f"present under {args.images_root} (split={args.val_split}). "
+            f"Examples: {preview}. Regenerate IDs with "
+            f"scripts/generate_test_ids.py or pass --id-list."
+        )
+        return 1
 
     print(f"[run] Processing {len(image_ids)} images ...")
 
@@ -1150,6 +1259,8 @@ def _add_shared_options(parser: argparse.ArgumentParser) -> None:
                         help="Comma-separated smoothing widths (default: 2.0,5.0,10.0,15.0,20.0).")
     parser.add_argument("--id-list", default=None,
                         help="Optional path to a text file containing image IDs to test.")
+    parser.add_argument("--ids-json", default=None,
+                        help="Path to generated ID JSON (default: outputs/e3_ids.json).")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1170,6 +1281,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_lists = subparsers.add_parser("make-lists", help="Create or verify fixed test ID lists.")
     p_lists.add_argument("--limit", type=int, default=None)
     p_lists.add_argument("--annotations", default=None, help="COCO instances JSON for audit manifest.")
+    p_lists.add_argument("--id-list", default=None,
+                         help="Optional path to a text file containing image IDs to export.")
+    p_lists.add_argument("--ids-json", default=None,
+                         help="Path to generated ID JSON (default: outputs/e3_ids.json).")
     p_lists.set_defaults(func=cmd_make_lists)
 
     # run
